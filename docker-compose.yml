@@ -1,0 +1,105 @@
+services:
+  mysql:
+    image: mysql:8.4.9
+    container_name: xinhe-nexus-mysql
+    ports:
+      - "${MYSQL_PORT:-13306}:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-xinhe_nexus}
+      MYSQL_CHARACTER_SET_SERVER: utf8mb4
+      MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./docs/sql/xinhe_nexus.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [xinhe-network]
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.9
+    container_name: xinhe-nexus-redis
+    ports:
+      - "${REDIS_PORT:-16379}:6379"
+    command: ["sh", "-c", "redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [xinhe-network]
+    restart: unless-stopped
+
+  management:
+    build:
+      context: .
+      dockerfile: xinhe-management/Dockerfile
+    image: xinhe-nexus-management:latest
+    container_name: xinhe-nexus-management
+    ports:
+      - "${MANAGEMENT_PORT:-18081}:18081"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 18081
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-xinhe_nexus}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-redis}
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-prod}
+      TZ: ${TZ:-Asia/Shanghai}
+    networks: [xinhe-network]
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: xinhe-app/Dockerfile
+    image: xinhe-nexus-app:latest
+    container_name: xinhe-nexus-app
+    ports:
+      - "${APP_PORT:-18083}:18083"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 18083
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-xinhe_nexus}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-redis}
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-prod}
+      TZ: ${TZ:-Asia/Shanghai}
+    networks: [xinhe-network]
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+    name: xinhe-nexus-mysql-data
+  redis-data:
+    name: xinhe-nexus-redis-data
+
+networks:
+  xinhe-network:
+    name: xinhe-nexus-network
+    driver: bridge
+
