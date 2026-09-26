@@ -61,6 +61,8 @@ services:
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379
       SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-redis}
+      XINHE_SUPER_ADMIN_USERNAME: ${XINHE_SUPER_ADMIN_USERNAME:-admin}
+      XINHE_SUPER_ADMIN_PASSWORD: ${XINHE_SUPER_ADMIN_PASSWORD:-admin}
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-prod}
       TZ: ${TZ:-Asia/Shanghai}
     networks: [xinhe-network]
@@ -102,4 +104,3 @@ networks:
   xinhe-network:
     name: xinhe-nexus-network
     driver: bridge
-

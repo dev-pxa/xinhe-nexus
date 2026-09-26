@@ -16,6 +16,24 @@ xinhe-app          移动端后端，端口 18083
 mvn spring-boot:run -pl xinhe-management -am
 ```
 
+管理端登录接口使用 Redis 保存会话，并通过 `HttpOnly` Cookie 下发登录凭证。默认内置超级管理员：
+
+```text
+账号：admin
+密码：admin
+角色：PLATFORM_ADMIN（全部权限）
+```
+
+生产环境请通过 `XINHE_SUPER_ADMIN_USERNAME` 和 `XINHE_SUPER_ADMIN_PASSWORD` 修改默认凭据。
+
+认证接口：
+
+```text
+POST /api/auth/login    登录并设置 Cookie
+GET  /api/auth/current  获取当前登录用户
+POST /api/auth/logout   注销并清除 Cookie
+```
+
 ## 后端独立 Docker 部署
 
 ```bash
@@ -32,4 +50,3 @@ cp .env.example .env
 curl http://localhost:18081/actuator/health
 curl http://localhost:18083/actuator/health
 ```
-

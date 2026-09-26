@@ -13,7 +13,13 @@ spring:
     redis:
       host: ${SPRING_DATA_REDIS_HOST:localhost}
       port: ${SPRING_DATA_REDIS_PORT:16379}
-      password: ${SPRING_DATA_REDIS_PASSWORD:}
+      password: ${SPRING_DATA_REDIS_PASSWORD:redis}
+
+xinhe:
+  auth:
+    super-admin:
+      username: ${XINHE_SUPER_ADMIN_USERNAME:admin}
+      password: ${XINHE_SUPER_ADMIN_PASSWORD:admin}
 
 mybatis:
   mapper-locations: classpath:mapper/*.xml
@@ -29,4 +35,3 @@ management:
     health:
       probes:
         enabled: true
-
