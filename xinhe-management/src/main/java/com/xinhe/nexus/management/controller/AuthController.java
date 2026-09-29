@@ -8,6 +8,8 @@ import com.xinhe.nexus.management.auth.ManagementUser;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.time.Instant;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestAttribute;
@@ -25,16 +27,17 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    public ApiResponse<ManagementUser> login(
+    public ResponseEntity<ApiResponse<ManagementUser>> login(
             @RequestBody LoginRequest loginRequest,
             HttpServletRequest request,
             HttpServletResponse response
     ) {
         ManagementUser user = authService.login(loginRequest, request, response);
         if (user == null) {
-            return new ApiResponse<>(401, "用户名或密码错误", null, null, Instant.now());
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(new ApiResponse<>(401, "用户名或密码错误，或账号当前不可用", null, null, Instant.now()));
         }
-        return ApiResponse.success(user);
+        return ResponseEntity.ok(ApiResponse.success(user));
     }
 
     @GetMapping("/current")
@@ -48,5 +51,23 @@ public class AuthController {
     public ApiResponse<Void> logout(HttpServletRequest request, HttpServletResponse response) {
         authService.logout(request, response);
         return ApiResponse.success(null);
+    }
+
+    @PostMapping("/password")
+    public ResponseEntity<ApiResponse<Void>> changePassword(
+            @RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser currentUser,
+            @RequestBody ChangePasswordRequest body
+    ) {
+        try {
+            if (!authService.changePassword(currentUser.id(), body.currentPassword(), body.newPassword())) {
+                return ResponseEntity.badRequest().body(ApiResponse.failure(400, "当前密码不正确"));
+            }
+            return ResponseEntity.ok(ApiResponse.success(null));
+        } catch (IllegalArgumentException exception) {
+            return ResponseEntity.badRequest().body(ApiResponse.failure(400, exception.getMessage()));
+        }
+    }
+
+    public record ChangePasswordRequest(String currentPassword, String newPassword) {
     }
 }

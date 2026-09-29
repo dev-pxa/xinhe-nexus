@@ -3,15 +3,14 @@ package com.xinhe.nexus.management.auth;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.UUID;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseCookie;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -20,34 +19,47 @@ public class ManagementAuthService {
     private static final Duration REMEMBERED_SESSION_TTL = Duration.ofDays(30);
 
     private final StringRedisTemplate redisTemplate;
-    private final String adminUsername;
-    private final String adminPassword;
+    private final UserAccountRepository userAccountRepository;
+    private final PasswordEncoder passwordEncoder;
 
     public ManagementAuthService(
             StringRedisTemplate redisTemplate,
-            @Value("${xinhe.auth.super-admin.username:admin}") String adminUsername,
-            @Value("${xinhe.auth.super-admin.password:admin}") String adminPassword
+            UserAccountRepository userAccountRepository,
+            PasswordEncoder passwordEncoder
     ) {
         this.redisTemplate = redisTemplate;
-        this.adminUsername = adminUsername;
-        this.adminPassword = adminPassword;
+        this.userAccountRepository = userAccountRepository;
+        this.passwordEncoder = passwordEncoder;
     }
 
     public ManagementUser login(LoginRequest request, HttpServletRequest servletRequest, HttpServletResponse response) {
-        if (request == null
-                || !constantTimeEquals(adminUsername, request.username())
-                || !constantTimeEquals(adminPassword, request.password())) {
+        if (request == null || request.username() == null || request.password() == null) {
             return null;
         }
-
+        UserAccount account = userAccountRepository.findByUsername(request.username().trim());
+        if (account == null || !"ENABLED".equals(account.status())) {
+            return null;
+        }
+        if (account.lockedUntil() != null && account.lockedUntil().isAfter(LocalDateTime.now())) {
+            return null;
+        }
+        if (!passwordEncoder.matches(request.password(), account.passwordHash())) {
+            userAccountRepository.recordLoginFailure(account.id(), account.loginFailedCount());
+            return null;
+        }
+        ManagementUser user = userAccountRepository.toManagementUser(account);
+        if (user == null) {
+            return null;
+        }
         Duration ttl = request.remember() ? REMEMBERED_SESSION_TTL : DEFAULT_SESSION_TTL;
         String token = UUID.randomUUID().toString().replace("-", "");
-        redisTemplate.opsForValue().set(AuthConstants.SESSION_KEY_PREFIX + token, adminUsername, ttl);
-        response.addHeader(
-                HttpHeaders.SET_COOKIE,
-                sessionCookie(token, ttl, request.remember(), servletRequest.isSecure()).toString()
-        );
-        return ManagementUser.superAdmin(adminUsername);
+        redisTemplate.opsForValue().set(
+                AuthConstants.SESSION_KEY_PREFIX + token,
+                account.id() + ":" + account.authVersion(), ttl);
+        userAccountRepository.recordLoginSuccess(account.id());
+        response.addHeader(HttpHeaders.SET_COOKIE,
+                sessionCookie(token, ttl, request.remember(), servletRequest.isSecure()).toString());
+        return user;
     }
 
     public ManagementUser currentUser(HttpServletRequest request) {
@@ -55,11 +67,25 @@ public class ManagementAuthService {
         if (token == null || token.isBlank()) {
             return null;
         }
-        String username = redisTemplate.opsForValue().get(AuthConstants.SESSION_KEY_PREFIX + token);
-        if (!adminUsername.equals(username)) {
+        String session = redisTemplate.opsForValue().get(AuthConstants.SESSION_KEY_PREFIX + token);
+        if (session == null) {
             return null;
         }
-        return ManagementUser.superAdmin(username);
+        String[] parts = session.split(":", 2);
+        if (parts.length != 2) {
+            return null;
+        }
+        try {
+            UserAccount account = userAccountRepository.findById(Long.parseLong(parts[0]));
+            if (account == null || !"ENABLED".equals(account.status())
+                    || account.authVersion() != Long.parseLong(parts[1])) {
+                redisTemplate.delete(AuthConstants.SESSION_KEY_PREFIX + token);
+                return null;
+            }
+            return userAccountRepository.toManagementUser(account);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     public void logout(HttpServletRequest request, HttpServletResponse response) {
@@ -67,25 +93,32 @@ public class ManagementAuthService {
         if (token != null && !token.isBlank()) {
             redisTemplate.delete(AuthConstants.SESSION_KEY_PREFIX + token);
         }
-        response.addHeader(
-                HttpHeaders.SET_COOKIE,
+        response.addHeader(HttpHeaders.SET_COOKIE,
                 ResponseCookie.from(AuthConstants.COOKIE_NAME, "")
-                        .httpOnly(true)
-                        .secure(request.isSecure())
-                        .sameSite("Lax")
-                        .path("/")
-                        .maxAge(Duration.ZERO)
-                        .build()
-                        .toString()
-        );
+                        .httpOnly(true).secure(request.isSecure()).sameSite("Lax")
+                        .path("/").maxAge(Duration.ZERO).build().toString());
+    }
+
+    public boolean changePassword(long userId, String currentPassword, String newPassword) {
+        UserAccount account = userAccountRepository.findById(userId);
+        if (account == null || currentPassword == null
+                || !passwordEncoder.matches(currentPassword, account.passwordHash())) {
+            return false;
+        }
+        validatePassword(newPassword);
+        userAccountRepository.updatePassword(userId, passwordEncoder.encode(newPassword));
+        return true;
+    }
+
+    public void validatePassword(String password) {
+        if (password == null || password.length() < 8 || password.length() > 72) {
+            throw new IllegalArgumentException("密码长度必须为8至72位");
+        }
     }
 
     private ResponseCookie sessionCookie(String token, Duration ttl, boolean remember, boolean secure) {
         ResponseCookie.ResponseCookieBuilder cookie = ResponseCookie.from(AuthConstants.COOKIE_NAME, token)
-                .httpOnly(true)
-                .secure(secure)
-                .sameSite("Lax")
-                .path("/");
+                .httpOnly(true).secure(secure).sameSite("Lax").path("/");
         if (remember) {
             cookie.maxAge(ttl);
         }
@@ -99,18 +132,6 @@ public class ManagementAuthService {
         }
         return Arrays.stream(cookies)
                 .filter(cookie -> AuthConstants.COOKIE_NAME.equals(cookie.getName()))
-                .map(Cookie::getValue)
-                .findFirst()
-                .orElse(null);
-    }
-
-    private boolean constantTimeEquals(String expected, String actual) {
-        if (expected == null || actual == null) {
-            return false;
-        }
-        return MessageDigest.isEqual(
-                expected.getBytes(StandardCharsets.UTF_8),
-                actual.getBytes(StandardCharsets.UTF_8)
-        );
+                .map(Cookie::getValue).findFirst().orElse(null);
     }
 }

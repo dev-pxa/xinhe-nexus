@@ -4,20 +4,13 @@ import java.util.List;
 
 public record ManagementUser(
         long id,
-        long tenantId,
+        Long companyId,
+        String companyName,
         String username,
         String name,
         List<String> roles,
-        List<String> permissions
+        List<String> permissions,
+        boolean mustChangePassword,
+        long authVersion
 ) {
-    public static ManagementUser superAdmin(String username) {
-        return new ManagementUser(
-                1L,
-                1L,
-                username,
-                "超级管理员",
-                List.of("PLATFORM_ADMIN"),
-                List.of("*")
-        );
-    }
 }

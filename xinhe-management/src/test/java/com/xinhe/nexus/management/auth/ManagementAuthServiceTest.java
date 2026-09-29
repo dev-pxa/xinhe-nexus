@@ -3,6 +3,7 @@ package com.xinhe.nexus.management.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -14,76 +15,110 @@ import static org.mockito.Mockito.when;
 
 import jakarta.servlet.http.Cookie;
 import java.time.Duration;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.security.crypto.password.PasswordEncoder;
 
 class ManagementAuthServiceTest {
     private StringRedisTemplate redisTemplate;
     private ValueOperations<String, String> valueOperations;
+    private UserAccountRepository accountRepository;
+    private PasswordEncoder passwordEncoder;
     private ManagementAuthService authService;
+    private UserAccount rootAccount;
+    private ManagementUser rootUser;
 
     @SuppressWarnings("unchecked")
     @BeforeEach
     void setUp() {
         redisTemplate = mock(StringRedisTemplate.class);
         valueOperations = mock(ValueOperations.class);
+        accountRepository = mock(UserAccountRepository.class);
+        passwordEncoder = mock(PasswordEncoder.class);
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        authService = new ManagementAuthService(redisTemplate, "admin", "admin");
+        authService = new ManagementAuthService(redisTemplate, accountRepository, passwordEncoder);
+        rootAccount = new UserAccount(
+                1L, "root", "bcrypt-hash", "平台管理员", "PLATFORM_ADMIN",
+                "ENABLED", true, 0, null, 3L);
+        rootUser = new ManagementUser(
+                1L, null, null, "root", "平台管理员",
+                List.of("PLATFORM_ADMIN"), List.of("*"), true, 3L);
     }
 
     @Test
-    void loginCreatesHttpOnlyCookieAndRedisSession() {
+    void loginCreatesHttpOnlyCookieAndVersionedRedisSession() {
+        when(accountRepository.findByUsername("root")).thenReturn(rootAccount);
+        when(passwordEncoder.matches("root", "bcrypt-hash")).thenReturn(true);
+        when(accountRepository.toManagementUser(rootAccount)).thenReturn(rootUser);
         MockHttpServletResponse response = new MockHttpServletResponse();
 
         ManagementUser user = authService.login(
-                new LoginRequest("admin", "admin", false),
-                new MockHttpServletRequest(),
-                response
-        );
+                new LoginRequest("root", "root", false), new MockHttpServletRequest(), response);
 
         assertNotNull(user);
-        assertEquals("admin", user.username());
+        assertEquals("root", user.username());
         assertEquals("PLATFORM_ADMIN", user.roles().get(0));
-        assertEquals("*", user.permissions().get(0));
         String setCookie = response.getHeader("Set-Cookie");
         assertNotNull(setCookie);
         assertTrue(setCookie.contains(AuthConstants.COOKIE_NAME + "="));
         assertTrue(setCookie.contains("HttpOnly"));
         assertTrue(setCookie.contains("SameSite=Lax"));
         verify(valueOperations).set(
-                startsWith(AuthConstants.SESSION_KEY_PREFIX),
-                eq("admin"),
-                eq(Duration.ofHours(12))
-        );
+                startsWith(AuthConstants.SESSION_KEY_PREFIX), eq("1:3"), eq(Duration.ofHours(12)));
+        verify(accountRepository).recordLoginSuccess(1L);
     }
 
     @Test
-    void loginRejectsInvalidCredentials() {
+    void loginRejectsInvalidPasswordAndRecordsFailure() {
+        when(accountRepository.findByUsername("root")).thenReturn(rootAccount);
+        when(passwordEncoder.matches("wrong", "bcrypt-hash")).thenReturn(false);
+
         ManagementUser user = authService.login(
-                new LoginRequest("admin", "wrong", false),
-                new MockHttpServletRequest(),
-                new MockHttpServletResponse()
-        );
+                new LoginRequest("root", "wrong", false),
+                new MockHttpServletRequest(), new MockHttpServletResponse());
 
         assertNull(user);
+        verify(accountRepository).recordLoginFailure(1L, 0);
         verifyNoInteractions(valueOperations);
     }
 
     @Test
-    void currentUserUsesCookieBackedRedisSession() {
+    void currentUserRejectsSessionAfterAuthVersionChanges() {
         MockHttpServletRequest request = new MockHttpServletRequest();
         request.setCookies(new Cookie(AuthConstants.COOKIE_NAME, "session-token"));
-        when(valueOperations.get(anyString())).thenReturn("admin");
+        when(valueOperations.get(anyString())).thenReturn("1:2");
+        when(accountRepository.findById(1L)).thenReturn(rootAccount);
+
+        assertNull(authService.currentUser(request));
+        verify(redisTemplate).delete(AuthConstants.SESSION_KEY_PREFIX + "session-token");
+    }
+
+    @Test
+    void currentUserLoadsDatabaseBackedIdentity() {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setCookies(new Cookie(AuthConstants.COOKIE_NAME, "session-token"));
+        when(valueOperations.get(anyString())).thenReturn("1:3");
+        when(accountRepository.findById(1L)).thenReturn(rootAccount);
+        when(accountRepository.toManagementUser(rootAccount)).thenReturn(rootUser);
 
         ManagementUser user = authService.currentUser(request);
 
         assertNotNull(user);
-        assertEquals("超级管理员", user.name());
-        verify(valueOperations).get(AuthConstants.SESSION_KEY_PREFIX + "session-token");
+        assertEquals("平台管理员", user.name());
+    }
+
+    @Test
+    void changePasswordValidatesMinimumLength() {
+        when(accountRepository.findById(1L)).thenReturn(rootAccount);
+        when(passwordEncoder.matches("root", "bcrypt-hash")).thenReturn(true);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> authService.changePassword(1L, "root", "short"));
     }
 
     @Test
@@ -95,8 +130,6 @@ class ManagementAuthServiceTest {
         authService.logout(request, response);
 
         verify(redisTemplate).delete(AuthConstants.SESSION_KEY_PREFIX + "session-token");
-        String setCookie = response.getHeader("Set-Cookie");
-        assertNotNull(setCookie);
-        assertTrue(setCookie.contains("Max-Age=0"));
+        assertTrue(response.getHeader("Set-Cookie").contains("Max-Age=0"));
     }
 }

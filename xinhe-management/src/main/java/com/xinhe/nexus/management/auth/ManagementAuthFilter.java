@@ -40,7 +40,8 @@ public class ManagementAuthFilter extends OncePerRequestFilter {
         ManagementUser currentUser = authService.currentUser(request);
         if (currentUser == null) {
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-            response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            response.setCharacterEncoding("UTF-8");
+            response.setContentType(MediaType.APPLICATION_JSON_VALUE + ";charset=UTF-8");
             objectMapper.writeValue(response.getWriter(), ApiResponse.failure(401, "未登录或登录已过期"));
             return;
         }

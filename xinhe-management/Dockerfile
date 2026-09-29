@@ -7,7 +7,7 @@ COPY xinhe-management/pom.xml xinhe-management/
 COPY xinhe-app/pom.xml xinhe-app/
 RUN mvn -B -s /root/.m2/settings.xml dependency:go-offline -pl xinhe-management -am
 COPY . .
-RUN mvn -B -s /root/.m2/settings.xml package -pl xinhe-management -am -DskipTests
+RUN mvn -B -s /root/.m2/settings.xml verify -pl xinhe-management -am
 
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
@@ -16,4 +16,3 @@ EXPOSE 18081
 ENV TZ=Asia/Shanghai
 ENV JAVA_OPTS="-Xms256m -Xmx512m -XX:+UseG1GC -XX:+HeapDumpOnOutOfMemoryError"
 ENTRYPOINT ["sh", "-c", "java ${JAVA_OPTS} -jar app.jar"]
-
