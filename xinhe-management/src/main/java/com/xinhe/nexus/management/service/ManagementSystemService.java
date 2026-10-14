@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
@@ -26,6 +27,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class ManagementSystemService {
+    private static final Pattern MOBILE_PHONE_PATTERN = Pattern.compile("^1[3-9]\\d{9}$");
+
     private final JdbcTemplate jdbcTemplate;
     private final PasswordEncoder passwordEncoder;
 
@@ -151,6 +154,7 @@ public class ManagementSystemService {
     public Map<String, Object> createOrganization(ManagementUser actor, Long requestedCompanyId, OrgSave body) {
         requireManager(actor, "system:org:create");
         long companyId = resolveCompany(actor, requestedCompanyId);
+        String contactPhone = normalizeMobilePhone(body.contactPhone());
         ParentOrg parent = parentOrganization(companyId, body.parentId());
         if (!"ENABLED".equals(parent.status())) {
             throw badRequest("上级组织已停用，不能创建下级组织");
@@ -163,7 +167,7 @@ public class ManagementSystemService {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, companyId, parent.id(), pendingCode, required(body.orgName(), "组织名称"),
                 parent.path() + "pending/", parent.level() + 1, body.managerUserId(),
-                trim(body.contactPhone()), trim(body.description()), status(body.status()), actor.id());
+                contactPhone, trim(body.description()), status(body.status()), actor.id());
         String companyCode = companyCode(companyId);
         String code = "ORG-" + companyCode + "-" + String.format("%06d", id);
         String path = parent.path() + id + "/";
@@ -176,6 +180,7 @@ public class ManagementSystemService {
     @Transactional
     public void updateOrganization(ManagementUser actor, long id, OrgSave body) {
         requireManager(actor, "system:org:update");
+        String contactPhone = normalizeMobilePhone(body.contactPhone());
         Map<String, Object> org = organization(id);
         long companyId = ((Number) org.get("companyId")).longValue();
         resolveCompany(actor, companyId);
@@ -185,7 +190,7 @@ public class ManagementSystemService {
                 SET org_name = ?, manager_user_id = ?, contact_phone = ?, description = ?, status = ?,
                     version = version + 1, updated_by = ?
                 WHERE id = ? AND company_id = ? AND version = ? AND deleted_at IS NULL
-                """, required(body.orgName(), "组织名称"), body.managerUserId(), trim(body.contactPhone()),
+                """, required(body.orgName(), "组织名称"), body.managerUserId(), contactPhone,
                 trim(body.description()), status(body.status()), actor.id(), id, companyId, expectedVersion);
         requireUpdated(changed);
         Long currentParent = (Long) org.get("parentId");
@@ -709,6 +714,14 @@ public class ManagementSystemService {
 
     private String trim(String value) {
         return value == null || value.isBlank() ? null : value.trim();
+    }
+
+    private String normalizeMobilePhone(String value) {
+        String phone = trim(value);
+        if (phone != null && !MOBILE_PHONE_PATTERN.matcher(phone).matches()) {
+            throw badRequest("联系电话必须是正确的11位手机号");
+        }
+        return phone;
     }
 
     private String status(String value) {

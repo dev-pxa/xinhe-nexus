@@ -72,6 +72,23 @@ class ManagementSystemServiceAuthorizationTest {
     }
 
     @Test
+    void organizationRejectsInvalidMobilePhoneBeforeWritingData() {
+        ManagementUser user = new ManagementUser(
+                10L, 100L, "公司A", "admin", "管理员",
+                List.of("COMPANY_ADMIN"), List.of("*"), false, 1L);
+
+        ManagementException exception = assertThrows(
+                ManagementException.class,
+                () -> service.createOrganization(user, null,
+                        new ManagementDtos.OrgSave(
+                                "研发部", 1L, null, "010-12345678", null, "ENABLED", null)));
+
+        assertEquals(HttpStatus.BAD_REQUEST, exception.status());
+        assertEquals("联系电话必须是正确的11位手机号", exception.getMessage());
+        verifyNoInteractions(jdbcTemplate);
+    }
+
+    @Test
     void positionListWithOrganizationUsesValidParameterizedSql() {
         ManagementUser user = new ManagementUser(
                 10L, 100L, "公司A", "admin", "管理员",
