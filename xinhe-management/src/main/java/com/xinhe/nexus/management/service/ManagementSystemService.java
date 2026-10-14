@@ -193,7 +193,7 @@ public class ManagementSystemService {
                 """, required(body.orgName(), "组织名称"), body.managerUserId(), contactPhone,
                 trim(body.description()), status(body.status()), actor.id(), id, companyId, expectedVersion);
         requireUpdated(changed);
-        Long currentParent = (Long) org.get("parentId");
+        Long currentParent = asNullableLong(org.get("parentId"));
         if (currentParent == null && body.parentId() != null) {
             throw badRequest("公司根组织不能移动");
         }
@@ -714,6 +714,16 @@ public class ManagementSystemService {
 
     private String trim(String value) {
         return value == null || value.isBlank() ? null : value.trim();
+    }
+
+    Long asNullableLong(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        throw new IllegalArgumentException("数据库数值类型无法转换为Long: " + value.getClass().getName());
     }
 
     String normalizeContactPhone(String value) {

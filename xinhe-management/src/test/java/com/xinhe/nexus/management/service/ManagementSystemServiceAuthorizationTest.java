@@ -11,6 +11,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.xinhe.nexus.management.auth.ManagementUser;
+import java.math.BigInteger;
 import java.util.List;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeEach;
@@ -102,6 +103,13 @@ class ManagementSystemServiceAuthorizationTest {
         for (String phone : List.of("1234", "++86 13800138000", "+86 (13800138000", "12345#678")) {
             assertThrows(ManagementException.class, () -> service.normalizeContactPhone(phone));
         }
+    }
+
+    @Test
+    void unsignedBigintParentIdConvertsWithoutClassCastException() {
+        assertEquals(1L, service.asNullableLong(BigInteger.ONE));
+        assertEquals(4L, service.asNullableLong(Integer.valueOf(4)));
+        assertNull(service.asNullableLong(null));
     }
 
     @Test
