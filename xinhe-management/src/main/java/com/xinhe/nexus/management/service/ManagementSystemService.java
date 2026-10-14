@@ -27,7 +27,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class ManagementSystemService {
-    private static final Pattern MOBILE_PHONE_PATTERN = Pattern.compile("^1[3-9]\\d{9}$");
+    private static final Pattern CONTACT_PHONE_CHARACTERS = Pattern.compile("^[0-9+()\\- ]+$");
 
     private final JdbcTemplate jdbcTemplate;
     private final PasswordEncoder passwordEncoder;
@@ -154,7 +154,7 @@ public class ManagementSystemService {
     public Map<String, Object> createOrganization(ManagementUser actor, Long requestedCompanyId, OrgSave body) {
         requireManager(actor, "system:org:create");
         long companyId = resolveCompany(actor, requestedCompanyId);
-        String contactPhone = normalizeMobilePhone(body.contactPhone());
+        String contactPhone = normalizeContactPhone(body.contactPhone());
         ParentOrg parent = parentOrganization(companyId, body.parentId());
         if (!"ENABLED".equals(parent.status())) {
             throw badRequest("上级组织已停用，不能创建下级组织");
@@ -180,7 +180,7 @@ public class ManagementSystemService {
     @Transactional
     public void updateOrganization(ManagementUser actor, long id, OrgSave body) {
         requireManager(actor, "system:org:update");
-        String contactPhone = normalizeMobilePhone(body.contactPhone());
+        String contactPhone = normalizeContactPhone(body.contactPhone());
         Map<String, Object> org = organization(id);
         long companyId = ((Number) org.get("companyId")).longValue();
         resolveCompany(actor, companyId);
@@ -716,10 +716,39 @@ public class ManagementSystemService {
         return value == null || value.isBlank() ? null : value.trim();
     }
 
-    private String normalizeMobilePhone(String value) {
+    String normalizeContactPhone(String value) {
         String phone = trim(value);
-        if (phone != null && !MOBILE_PHONE_PATTERN.matcher(phone).matches()) {
-            throw badRequest("联系电话必须是正确的11位手机号");
+        if (phone == null) {
+            return null;
+        }
+        int digitCount = 0;
+        int parenthesisBalance = 0;
+        boolean validParentheses = true;
+        for (int index = 0; index < phone.length(); index++) {
+            char character = phone.charAt(index);
+            if (character >= '0' && character <= '9') {
+                digitCount++;
+            } else if (character == '(') {
+                parenthesisBalance++;
+                validParentheses &= parenthesisBalance == 1;
+            } else if (character == ')') {
+                parenthesisBalance--;
+                validParentheses &= parenthesisBalance >= 0;
+            }
+        }
+        int plusIndex = phone.indexOf('+');
+        boolean validPlus = plusIndex < 0 || (plusIndex == 0 && phone.lastIndexOf('+') == 0);
+        char firstCharacter = phone.charAt(0);
+        char lastCharacter = phone.charAt(phone.length() - 1);
+        boolean validBoundary = firstCharacter == '+' || firstCharacter == '('
+                || (firstCharacter >= '0' && firstCharacter <= '9');
+        validBoundary &= lastCharacter == ')'
+                || (lastCharacter >= '0' && lastCharacter <= '9');
+        if (phone.length() < 5 || phone.length() > 32
+                || !CONTACT_PHONE_CHARACTERS.matcher(phone).matches()
+                || digitCount < 5 || digitCount > 20
+                || !validPlus || !validBoundary || !validParentheses || parenthesisBalance != 0) {
+            throw badRequest("联系电话格式不正确，可填写国际号码、座机或手机号");
         }
         return phone;
     }

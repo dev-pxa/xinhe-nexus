@@ -2,6 +2,7 @@ package com.xinhe.nexus.management.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.eq;
@@ -72,7 +73,7 @@ class ManagementSystemServiceAuthorizationTest {
     }
 
     @Test
-    void organizationRejectsInvalidMobilePhoneBeforeWritingData() {
+    void organizationRejectsInvalidContactPhoneBeforeWritingData() {
         ManagementUser user = new ManagementUser(
                 10L, 100L, "公司A", "admin", "管理员",
                 List.of("COMPANY_ADMIN"), List.of("*"), false, 1L);
@@ -81,11 +82,26 @@ class ManagementSystemServiceAuthorizationTest {
                 ManagementException.class,
                 () -> service.createOrganization(user, null,
                         new ManagementDtos.OrgSave(
-                                "研发部", 1L, null, "010-12345678", null, "ENABLED", null)));
+                                "研发部", 1L, null, "contact@example.com", null, "ENABLED", null)));
 
         assertEquals(HttpStatus.BAD_REQUEST, exception.status());
-        assertEquals("联系电话必须是正确的11位手机号", exception.getMessage());
+        assertEquals("联系电话格式不正确，可填写国际号码、座机或手机号", exception.getMessage());
         verifyNoInteractions(jdbcTemplate);
+    }
+
+    @Test
+    void organizationAcceptsInternationalLandlineAndMobileFormats() {
+        assertEquals("+1 (415) 555-2671", service.normalizeContactPhone("  +1 (415) 555-2671  "));
+        assertEquals("+86 138 0013 8000", service.normalizeContactPhone("+86 138 0013 8000"));
+        assertEquals("010-12345678", service.normalizeContactPhone("010-12345678"));
+        assertNull(service.normalizeContactPhone("  "));
+    }
+
+    @Test
+    void organizationRejectsMalformedContactPhoneFormats() {
+        for (String phone : List.of("1234", "++86 13800138000", "+86 (13800138000", "12345#678")) {
+            assertThrows(ManagementException.class, () -> service.normalizeContactPhone(phone));
+        }
     }
 
     @Test
