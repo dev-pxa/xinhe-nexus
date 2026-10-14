@@ -12,7 +12,6 @@ import com.xinhe.nexus.management.service.ManagementDtos.UserPositions;
 import com.xinhe.nexus.management.service.ManagementDtos.UserUpdate;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -235,13 +234,6 @@ public class ManagementSystemService {
 
     public List<Map<String, Object>> listPositions(ManagementUser actor, Long requestedCompanyId, Long orgUnitId) {
         long companyId = resolveCompany(actor, requestedCompanyId);
-        List<Object> args = new ArrayList<>();
-        args.add(companyId);
-        String filter = "";
-        if (orgUnitId != null) {
-            filter = " AND p.org_unit_id = ?";
-            args.add(orgUnitId);
-        }
         return jdbcTemplate.queryForList("""
                 SELECT p.id, p.company_id AS companyId, p.org_unit_id AS orgUnitId,
                        o.org_name AS orgName, p.position_code AS positionCode,
@@ -255,12 +247,12 @@ public class ManagementSystemService {
                     AND up.status = 'ENABLED' AND up.deleted_at IS NULL
                 LEFT JOIN sys_position_permission pp ON pp.position_id = p.id
                 WHERE p.company_id = ? AND p.deleted_at IS NULL
-                """ + filter + """
+                  AND (? IS NULL OR p.org_unit_id = ?)
                 GROUP BY p.id, p.company_id, p.org_unit_id, o.org_name, p.position_code,
                          p.position_name, p.responsibilities, p.status, p.version,
                          p.created_at, p.updated_at
                 ORDER BY o.org_name, p.position_name, p.created_at
-                """, args.toArray());
+                """, companyId, orgUnitId, orgUnitId);
     }
 
     @Transactional

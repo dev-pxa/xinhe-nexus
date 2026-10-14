@@ -45,4 +45,10 @@ assert_contains "$admin_login_body" '"companyName":"芯河智枢总公司"'
 admin_company_body="$(curl -sS -b "$admin_cookie_file" "$base_url/api/system/companies")"
 assert_contains "$admin_company_body" '"companyCode":"XINHE"'
 
-echo '管理端冒烟测试通过：root/admin认证、数据库账号、公司隔离查询、401保护均正常。'
+position_body="$(curl -sS -b "$admin_cookie_file" "$base_url/api/system/positions?orgUnitId=1")"
+assert_contains "$position_body" '"code":0'
+
+all_position_body="$(curl -sS -b "$admin_cookie_file" "$base_url/api/system/positions")"
+assert_contains "$all_position_body" '"code":0'
+
+echo '管理端冒烟测试通过：root/admin认证、公司隔离查询、岗位筛选、401保护均正常。'

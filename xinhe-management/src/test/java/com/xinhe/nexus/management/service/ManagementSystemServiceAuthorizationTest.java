@@ -1,12 +1,17 @@
 package com.xinhe.nexus.management.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.xinhe.nexus.management.auth.ManagementUser;
 import java.util.List;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -64,5 +69,20 @@ class ManagementSystemServiceAuthorizationTest {
 
         assertEquals(HttpStatus.FORBIDDEN, exception.status());
         verifyNoInteractions(jdbcTemplate);
+    }
+
+    @Test
+    void positionListWithOrganizationUsesValidParameterizedSql() {
+        ManagementUser user = new ManagementUser(
+                10L, 100L, "公司A", "admin", "管理员",
+                List.of("COMPANY_ADMIN"), List.of("*"), false, 1L);
+
+        service.listPositions(user, null, 1L);
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbcTemplate).queryForList(sql.capture(), eq(100L), eq(1L), eq(1L));
+        String normalizedSql = sql.getValue().replaceAll("\\s+", " ");
+        assertTrue(normalizedSql.contains("AND (? IS NULL OR p.org_unit_id = ?) GROUP BY"));
+        assertFalse(sql.getValue().contains("?GROUP BY"));
     }
 }
