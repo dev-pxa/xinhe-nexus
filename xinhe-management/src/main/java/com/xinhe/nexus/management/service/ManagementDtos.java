@@ -7,8 +7,7 @@ public final class ManagementDtos {
     }
 
     public record CompanyCreate(
-            String companyCode, String companyName, Long upstreamCompanyId,
-            String contactName, String contactPhone
+            String companyName, Long upstreamCompanyId, String contactName, String contactPhone
     ) {
     }
 

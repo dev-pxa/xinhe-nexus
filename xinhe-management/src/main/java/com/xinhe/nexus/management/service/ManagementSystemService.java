@@ -66,7 +66,6 @@ public class ManagementSystemService {
     @Transactional
     public Map<String, Object> createCompany(ManagementUser actor, CompanyCreate body) {
         requirePlatform(actor);
-        String code = normalizeCode(body.companyCode());
         String name = required(body.companyName(), "公司名称");
         int channelLevel = 1;
         if (body.upstreamCompanyId() != null) {
@@ -78,12 +77,15 @@ public class ManagementSystemService {
             }
             channelLevel = parentLevel + 1;
         }
+        String pendingCode = "PENDING-" + UUID.randomUUID().toString().substring(0, 8);
         long companyId = insertAndReturnId(
                 """
                 INSERT INTO sys_company
                     (company_code, company_name, channel_level, contact_name, contact_phone, status, created_by)
                 VALUES (?, ?, ?, ?, ?, 'ENABLED', ?)
-                """, code, name, channelLevel, trim(body.contactName()), trim(body.contactPhone()), actor.id());
+                """, pendingCode, name, channelLevel, trim(body.contactName()), trim(body.contactPhone()), actor.id());
+        String code = generateCompanyCode(companyId);
+        jdbcTemplate.update("UPDATE sys_company SET company_code = ? WHERE id = ?", code, companyId);
         if (body.upstreamCompanyId() != null) {
             jdbcTemplate.update("""
                     INSERT INTO sys_company_relation
@@ -697,12 +699,8 @@ public class ManagementSystemService {
         }
     }
 
-    private String normalizeCode(String value) {
-        String code = required(value, "公司编号").toUpperCase(Locale.ROOT);
-        if (!code.matches("[A-Z0-9_-]{2,32}")) {
-            throw badRequest("公司编号只能包含2至32位大写字母、数字、下划线或中划线");
-        }
-        return code;
+    String generateCompanyCode(long companyId) {
+        return "COMP" + String.format(Locale.ROOT, "%08d", companyId);
     }
 
     private String required(String value, String label) {

@@ -113,6 +113,13 @@ class ManagementSystemServiceAuthorizationTest {
     }
 
     @Test
+    void companyCodeIsGeneratedFromDatabaseId() {
+        assertEquals("COMP00000001", service.generateCompanyCode(1L));
+        assertEquals("COMP00000042", service.generateCompanyCode(42L));
+        assertEquals("COMP123456789", service.generateCompanyCode(123456789L));
+    }
+
+    @Test
     void positionListWithOrganizationUsesValidParameterizedSql() {
         ManagementUser user = new ManagementUser(
                 10L, 100L, "公司A", "admin", "管理员",

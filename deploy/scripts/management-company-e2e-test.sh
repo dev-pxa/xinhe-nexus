@@ -3,7 +3,7 @@ set -euo pipefail
 
 API_BASE="${API_BASE:-http://localhost:18081}"
 PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-TEST_CODE="AUTOTEST$(date +%s)"
+TEST_CODE=""
 ROOT_COOKIE="$(mktemp)"
 COMPANY_COOKIE="$(mktemp)"
 CREATED=0
@@ -43,12 +43,16 @@ curl -fsS -c "$ROOT_COOKIE" -H 'Content-Type: application/json' \
   "$API_BASE/api/auth/login" | grep -q '"code":0'
 
 create_response="$(curl -fsS -b "$ROOT_COOKIE" -H 'Content-Type: application/json' \
-  -d "{\"companyCode\":\"${TEST_CODE}\",\"companyName\":\"自动化测试公司\"}" \
+  -d '{"companyName":"自动化测试公司"}' \
   "$API_BASE/api/system/companies")"
+TEST_CODE="$(sed -n 's/.*"companyCode":"\([^"]*\)".*/\1/p' <<<"$create_response")"
+if [[ -n "$TEST_CODE" ]]; then
+  CREATED=1
+fi
+[[ "$TEST_CODE" =~ ^COMP[0-9]{8,}$ ]]
 grep -q "\"companyCode\":\"${TEST_CODE}\"" <<<"$create_response"
 grep -q "\"administratorUsername\":\"${TEST_CODE}\"" <<<"$create_response"
 grep -q "\"initialPassword\":\"${TEST_CODE}\"" <<<"$create_response"
-CREATED=1
 
 curl -fsS -c "$COMPANY_COOKIE" -H 'Content-Type: application/json' \
   -d "{\"username\":\"${TEST_CODE}\",\"password\":\"${TEST_CODE}\",\"remember\":false}" \
