@@ -99,21 +99,63 @@ public class ManagementAuthService {
                         .path("/").maxAge(Duration.ZERO).build().toString());
     }
 
-    public boolean changePassword(long userId, String currentPassword, String newPassword) {
+    public PersonalProfile getProfile(long userId) {
+        return userAccountRepository.findProfile(userId);
+    }
+
+    public ManagementUser updateProfile(long userId, String displayName, String phone, String email) {
+        String normalizedName = requireText(displayName, "姓名", 64);
+        String normalizedPhone = optionalText(phone, "手机号", 32);
+        String normalizedEmail = optionalText(email, "邮箱", 128);
+        if (normalizedEmail != null
+                && !normalizedEmail.matches("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$")) {
+            throw new IllegalArgumentException("邮箱格式不正确");
+        }
+        userAccountRepository.updateProfile(userId, normalizedName, normalizedPhone, normalizedEmail);
+        UserAccount account = userAccountRepository.findById(userId);
+        return account == null ? null : userAccountRepository.toManagementUser(account);
+    }
+
+    public boolean changePassword(
+            long userId,
+            String currentPassword,
+            String newPassword,
+            String confirmPassword
+    ) {
+        if (newPassword == null || !newPassword.equals(confirmPassword)) {
+            throw new IllegalArgumentException("两次输入的新密码不一致");
+        }
         UserAccount account = userAccountRepository.findById(userId);
         if (account == null || currentPassword == null
                 || !passwordEncoder.matches(currentPassword, account.passwordHash())) {
             return false;
         }
-        validatePassword(newPassword);
+        PasswordPolicy.validate(newPassword);
         userAccountRepository.updatePassword(userId, passwordEncoder.encode(newPassword));
         return true;
     }
 
     public void validatePassword(String password) {
-        if (password == null || password.length() < 8 || password.length() > 72) {
-            throw new IllegalArgumentException("密码长度必须为8至72位");
+        PasswordPolicy.validate(password);
+    }
+
+    private String requireText(String value, String label, int maxLength) {
+        String normalized = optionalText(value, label, maxLength);
+        if (normalized == null) {
+            throw new IllegalArgumentException(label + "不能为空");
         }
+        return normalized;
+    }
+
+    private String optionalText(String value, String label, int maxLength) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String normalized = value.trim();
+        if (normalized.length() > maxLength) {
+            throw new IllegalArgumentException(label + "长度不能超过" + maxLength + "位");
+        }
+        return normalized;
     }
 
     private ResponseCookie sessionCookie(String token, Duration ttl, boolean remember, boolean secure) {

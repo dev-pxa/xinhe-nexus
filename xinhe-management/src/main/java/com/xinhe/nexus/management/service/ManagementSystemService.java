@@ -1,6 +1,7 @@
 package com.xinhe.nexus.management.service;
 
 import com.xinhe.nexus.management.auth.ManagementUser;
+import com.xinhe.nexus.management.auth.PasswordPolicy;
 import com.xinhe.nexus.management.service.ManagementDtos.CompanyCreate;
 import com.xinhe.nexus.management.service.ManagementDtos.CompanyUpdate;
 import com.xinhe.nexus.management.service.ManagementDtos.OrgSave;
@@ -770,8 +771,10 @@ public class ManagementSystemService {
     }
 
     private void validatePassword(String password) {
-        if (password == null || password.length() < 8 || password.length() > 72) {
-            throw badRequest("密码长度必须为8至72位");
+        try {
+            PasswordPolicy.validate(password);
+        } catch (IllegalArgumentException exception) {
+            throw badRequest(exception.getMessage());
         }
     }
 

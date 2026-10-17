@@ -118,7 +118,24 @@ class ManagementAuthServiceTest {
         when(passwordEncoder.matches("root", "bcrypt-hash")).thenReturn(true);
 
         assertThrows(IllegalArgumentException.class,
-                () -> authService.changePassword(1L, "root", "short"));
+                () -> authService.changePassword(1L, "root", "short", "short"));
+    }
+
+    @Test
+    void changePasswordRequiresMatchingConfirmation() {
+        assertThrows(IllegalArgumentException.class,
+                () -> authService.changePassword(1L, "root", "Abc123!", "Abc123?"));
+        verifyNoInteractions(accountRepository);
+    }
+
+    @Test
+    void passwordPolicyRequiresThreeAsciiCharacterCategories() {
+        authService.validatePassword("xinhe123.");
+        authService.validatePassword("Abc123");
+
+        assertThrows(IllegalArgumentException.class, () -> authService.validatePassword("abcdef1"));
+        assertThrows(IllegalArgumentException.class, () -> authService.validatePassword("Abc 123"));
+        assertThrows(IllegalArgumentException.class, () -> authService.validatePassword("密码Abc123"));
     }
 
     @Test

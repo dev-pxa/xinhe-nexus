@@ -109,6 +109,28 @@ public class UserAccountRepository {
                 """, passwordHash, id);
     }
 
+    public PersonalProfile findProfile(long id) {
+        List<PersonalProfile> profiles = jdbcTemplate.query(
+                """
+                SELECT username, display_name, phone, email
+                FROM sys_user WHERE id = ? AND deleted_at IS NULL
+                """,
+                (rs, rowNum) -> new PersonalProfile(
+                        rs.getString("username"), rs.getString("display_name"),
+                        rs.getString("phone"), rs.getString("email")), id);
+        return profiles.isEmpty() ? null : profiles.get(0);
+    }
+
+    public void updateProfile(long id, String displayName, String phone, String email) {
+        jdbcTemplate.update(
+                """
+                UPDATE sys_user
+                SET display_name = ?, phone = ?, email = ?, version = version + 1,
+                    updated_by = ?, updated_at = NOW()
+                WHERE id = ? AND deleted_at IS NULL
+                """, displayName, phone, email, id, id);
+    }
+
     private UserAccount mapAccount(ResultSet rs, int rowNum) throws SQLException {
         return new UserAccount(
                 rs.getLong("id"), rs.getString("username"), rs.getString("password_hash"),
