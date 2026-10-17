@@ -27,6 +27,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class ManagementSystemService {
+    static final String DEFAULT_USER_PASSWORD = "xinhe123.";
     private static final Pattern CONTACT_PHONE_CHARACTERS = Pattern.compile("^[0-9+()\\- ]+$");
 
     private final JdbcTemplate jdbcTemplate;
@@ -352,15 +353,15 @@ public class ManagementSystemService {
     public Map<String, Object> createUser(ManagementUser actor, UserCreate body) {
         requireManager(actor, "system:user:create");
         long companyId = resolveCompany(actor, body.companyId());
-        validatePassword(body.password());
-        String username = required(body.username(), "登录账号");
+        String username = required(body.username(), "用户名");
+        String phone = required(body.phone(), "手机号");
         long userId = insertAndReturnId("""
                 INSERT INTO sys_user
                     (username, password_hash, display_name, user_type, phone, email,
                      status, must_change_password, created_by)
                 VALUES (?, ?, ?, 'COMPANY_USER', ?, ?, 'ENABLED', 1, ?)
-                """, username, passwordEncoder.encode(body.password()), required(body.displayName(), "用户姓名"),
-                trim(body.phone()), trim(body.email()), actor.id());
+                """, username, passwordEncoder.encode(DEFAULT_USER_PASSWORD), required(body.displayName(), "用户姓名"),
+                phone, trim(body.email()), actor.id());
         jdbcTemplate.update("""
                 INSERT INTO sys_user_company
                     (user_id, company_id, is_company_admin, status, created_by)

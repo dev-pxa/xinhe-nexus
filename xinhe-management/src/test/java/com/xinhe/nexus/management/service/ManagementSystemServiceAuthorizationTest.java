@@ -120,6 +120,28 @@ class ManagementSystemServiceAuthorizationTest {
     }
 
     @Test
+    void newUserUsesExpectedDefaultPassword() {
+        assertEquals("xinhe123.", ManagementSystemService.DEFAULT_USER_PASSWORD);
+    }
+
+    @Test
+    void newUserRequiresPhoneBeforeWritingData() {
+        ManagementUser user = new ManagementUser(
+                10L, 100L, "公司A", "admin", "管理员",
+                List.of("COMPANY_ADMIN"), List.of("*"), false, 1L);
+
+        ManagementException exception = assertThrows(
+                ManagementException.class,
+                () -> service.createUser(user,
+                        new ManagementDtos.UserCreate(
+                                null, "zhangsan", "张三", " ", null, false, List.of())));
+
+        assertEquals(HttpStatus.BAD_REQUEST, exception.status());
+        assertEquals("手机号不能为空", exception.getMessage());
+        verifyNoInteractions(jdbcTemplate);
+    }
+
+    @Test
     void positionListWithOrganizationUsesValidParameterizedSql() {
         ManagementUser user = new ManagementUser(
                 10L, 100L, "公司A", "admin", "管理员",

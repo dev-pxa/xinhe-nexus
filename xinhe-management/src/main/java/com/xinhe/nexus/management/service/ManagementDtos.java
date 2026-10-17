@@ -29,7 +29,7 @@ public final class ManagementDtos {
     }
 
     public record UserCreate(
-            Long companyId, String username, String password, String displayName,
+            Long companyId, String username, String displayName,
             String phone, String email, boolean companyAdmin, List<Long> positionIds
     ) {
     }
