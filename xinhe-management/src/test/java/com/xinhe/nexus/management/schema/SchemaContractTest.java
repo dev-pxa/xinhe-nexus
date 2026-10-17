@@ -52,4 +52,16 @@ class SchemaContractTest {
             assertTrue(line.contains(" COMMENT '"), "字段缺少注释：" + line);
         }
     }
+
+    @Test
+    void primaryPositionIsRemovedByMigration() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream("/db/migration/V2__drop_primary_position.sql")) {
+            assertTrue(stream != null, "删除主岗位字段的数据库迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertTrue(sql.contains("ALTER TABLE sys_user_position"));
+        assertTrue(sql.contains("DROP COLUMN is_primary"));
+    }
 }

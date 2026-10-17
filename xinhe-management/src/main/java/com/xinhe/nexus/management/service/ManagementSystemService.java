@@ -368,7 +368,7 @@ public class ManagementSystemService {
                 VALUES (?, ?, ?, 'ENABLED', ?)
                 """, userId, companyId, body.companyAdmin() ? 1 : 0, actor.id());
         replaceUserPositions(actor, companyId, userId,
-                new UserPositions(body.positionIds() == null ? List.of() : body.positionIds(), null));
+                new UserPositions(body.positionIds() == null ? List.of() : body.positionIds()));
         audit(actor, companyId, "USER", "CREATE", userId);
         return Map.of("id", userId, "username", username);
     }
@@ -415,10 +415,9 @@ public class ManagementSystemService {
         for (Long positionId : positionIds) {
             jdbcTemplate.update("""
                     INSERT INTO sys_user_position
-                        (company_id, user_id, position_id, is_primary, status, created_by)
-                    VALUES (?, ?, ?, ?, 'ENABLED', ?)
-                    """, companyId, userId, positionId,
-                    positionId.equals(body.primaryPositionId()) ? 1 : 0, actor.id());
+                        (company_id, user_id, position_id, status, created_by)
+                    VALUES (?, ?, ?, 'ENABLED', ?)
+                    """, companyId, userId, positionId, actor.id());
         }
         jdbcTemplate.update("UPDATE sys_user SET auth_version = auth_version + 1 WHERE id = ?", userId);
         incrementCompanyAuthVersion(companyId);
@@ -487,13 +486,13 @@ public class ManagementSystemService {
         return jdbcTemplate.queryForList("""
                 SELECT up.position_id AS positionId, p.position_code AS positionCode,
                        p.position_name AS positionName, p.org_unit_id AS orgUnitId,
-                       o.org_name AS orgName, up.is_primary AS primaryPosition
+                       o.org_name AS orgName
                 FROM sys_user_position up
                 JOIN sys_position p ON p.id = up.position_id AND p.deleted_at IS NULL
                 JOIN sys_org_unit o ON o.id = p.org_unit_id AND o.deleted_at IS NULL
                 WHERE up.company_id = ? AND up.user_id = ?
                   AND up.status = 'ENABLED' AND up.deleted_at IS NULL
-                ORDER BY up.is_primary DESC, p.position_name
+                ORDER BY p.position_name
                 """, companyId, userId);
     }
 

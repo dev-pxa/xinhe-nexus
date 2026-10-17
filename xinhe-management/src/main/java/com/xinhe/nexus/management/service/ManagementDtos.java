@@ -46,7 +46,7 @@ public final class ManagementDtos {
     public record PositionPermissions(List<Long> permissionIds) {
     }
 
-    public record UserPositions(List<Long> positionIds, Long primaryPositionId) {
+    public record UserPositions(List<Long> positionIds) {
     }
 
     public record ResetPassword(String newPassword) {
