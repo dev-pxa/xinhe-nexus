@@ -67,7 +67,7 @@ class ManagementSystemServiceAuthorizationTest {
         ManagementException exception = assertThrows(
                 ManagementException.class,
                 () -> service.createOrganization(user, null,
-                        new ManagementDtos.OrgSave("研发部", null, null, null, null, "ENABLED", null)));
+                        new ManagementDtos.OrgSave("研发部", null, null, null, null, null, "ENABLED", null)));
 
         assertEquals(HttpStatus.FORBIDDEN, exception.status());
         verifyNoInteractions(jdbcTemplate);
@@ -83,7 +83,7 @@ class ManagementSystemServiceAuthorizationTest {
                 ManagementException.class,
                 () -> service.createOrganization(user, null,
                         new ManagementDtos.OrgSave(
-                                "研发部", 1L, null, "contact@example.com", null, "ENABLED", null)));
+                                "研发部", 1L, null, null, "contact@example.com", null, "ENABLED", null)));
 
         assertEquals(HttpStatus.BAD_REQUEST, exception.status());
         assertEquals("联系电话格式不正确，可填写国际号码、座机或手机号", exception.getMessage());

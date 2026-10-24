@@ -139,7 +139,9 @@ public class ManagementSystemService {
                 SELECT o.id, o.company_id AS companyId, o.parent_id AS parentId,
                        o.org_code AS orgCode, o.org_name AS orgName, o.org_path AS orgPath,
                        o.org_level AS orgLevel, o.manager_user_id AS managerUserId,
-                       u.display_name AS managerName, o.contact_phone AS contactPhone,
+                       u.display_name AS managerName, o.manager_position_id AS managerPositionId,
+                       mp.position_code AS managerPositionCode, mp.position_name AS managerPositionName,
+                       o.contact_phone AS contactPhone,
                        o.description, o.status, o.version, o.created_at AS createdAt,
                        o.updated_at AS updatedAt,
                        CASE WHEN o.status = 'ENABLED' AND NOT EXISTS (
@@ -149,6 +151,8 @@ public class ManagementSystemService {
                        ) THEN 1 ELSE 0 END AS effectiveEnabled
                 FROM sys_org_unit o
                 LEFT JOIN sys_user u ON u.id = o.manager_user_id AND u.deleted_at IS NULL
+                LEFT JOIN sys_position mp ON mp.id = o.manager_position_id
+                    AND mp.company_id = o.company_id AND mp.deleted_at IS NULL
                 WHERE o.company_id = ? AND o.deleted_at IS NULL
                 ORDER BY o.org_level, o.org_name, o.created_at
                 """, companyId);
@@ -159,6 +163,9 @@ public class ManagementSystemService {
         requireManager(actor, "system:org:create");
         long companyId = resolveCompany(actor, requestedCompanyId);
         String contactPhone = normalizeContactPhone(body.contactPhone());
+        if (body.managerPositionId() != null) {
+            throw badRequest("新建组织暂不能设置负责人，请先创建岗位后编辑组织");
+        }
         ParentOrg parent = parentOrganization(companyId, body.parentId());
         if (!"ENABLED".equals(parent.status())) {
             throw badRequest("上级组织已停用，不能创建下级组织");
@@ -167,10 +174,10 @@ public class ManagementSystemService {
         long id = insertAndReturnId("""
                 INSERT INTO sys_org_unit
                     (company_id, parent_id, org_code, org_name, org_path, org_level,
-                     manager_user_id, contact_phone, description, status, created_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     manager_user_id, manager_position_id, contact_phone, description, status, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, companyId, parent.id(), pendingCode, required(body.orgName(), "组织名称"),
-                parent.path() + "pending/", parent.level() + 1, body.managerUserId(),
+                parent.path() + "pending/", parent.level() + 1, body.managerUserId(), body.managerPositionId(),
                 contactPhone, trim(body.description()), status(body.status()), actor.id());
         String companyCode = companyCode(companyId);
         String code = "ORG-" + companyCode + "-" + String.format("%06d", id);
@@ -188,14 +195,15 @@ public class ManagementSystemService {
         Map<String, Object> org = organization(id);
         long companyId = ((Number) org.get("companyId")).longValue();
         resolveCompany(actor, companyId);
+        validateManagerPosition(companyId, id, body.managerPositionId());
         int expectedVersion = body.version() == null ? -1 : body.version();
         int changed = jdbcTemplate.update("""
                 UPDATE sys_org_unit
-                SET org_name = ?, manager_user_id = ?, contact_phone = ?, description = ?, status = ?,
+                SET org_name = ?, manager_user_id = ?, manager_position_id = ?, contact_phone = ?, description = ?, status = ?,
                     version = version + 1, updated_by = ?
                 WHERE id = ? AND company_id = ? AND version = ? AND deleted_at IS NULL
-                """, required(body.orgName(), "组织名称"), body.managerUserId(), contactPhone,
-                trim(body.description()), status(body.status()), actor.id(), id, companyId, expectedVersion);
+                """, required(body.orgName(), "组织名称"), body.managerUserId(), body.managerPositionId(),
+                contactPhone, trim(body.description()), status(body.status()), actor.id(), id, companyId, expectedVersion);
         requireUpdated(changed);
         Long currentParent = asNullableLong(org.get("parentId"));
         if (currentParent == null && body.parentId() != null) {
@@ -565,6 +573,19 @@ public class ManagementSystemService {
                 WHERE id = ? AND company_id = ? AND status = 'ENABLED' AND deleted_at IS NULL
                 """, orgUnitId, companyId) == 0) {
             throw badRequest("组织不存在、已停用或不属于当前公司");
+        }
+    }
+
+    private void validateManagerPosition(long companyId, long orgUnitId, Long positionId) {
+        if (positionId == null) {
+            return;
+        }
+        if (count("""
+                SELECT COUNT(*) FROM sys_position
+                WHERE id = ? AND company_id = ? AND org_unit_id = ?
+                  AND status = 'ENABLED' AND deleted_at IS NULL
+                """, positionId, companyId, orgUnitId) == 0) {
+            throw badRequest("负责人必须选择当前组织下的有效岗位");
         }
     }
 

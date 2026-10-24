@@ -64,4 +64,16 @@ class SchemaContractTest {
         assertTrue(sql.contains("ALTER TABLE sys_user_position"));
         assertTrue(sql.contains("DROP COLUMN is_primary"));
     }
+
+    @Test
+    void organizationManagerPositionIsAddedByMigration() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream("/db/migration/V3__add_org_manager_position.sql")) {
+            assertTrue(stream != null, "组织负责人岗位迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertTrue(sql.contains("ALTER TABLE sys_org_unit"));
+        assertTrue(sql.contains("ADD COLUMN manager_position_id"));
+    }
 }

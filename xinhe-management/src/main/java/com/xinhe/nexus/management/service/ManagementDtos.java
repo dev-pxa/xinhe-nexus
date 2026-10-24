@@ -17,8 +17,8 @@ public final class ManagementDtos {
     }
 
     public record OrgSave(
-            String orgName, Long parentId, Long managerUserId, String contactPhone,
-            String description, String status, Integer version
+            String orgName, Long parentId, Long managerUserId, Long managerPositionId,
+            String contactPhone, String description, String status, Integer version
     ) {
     }
 
