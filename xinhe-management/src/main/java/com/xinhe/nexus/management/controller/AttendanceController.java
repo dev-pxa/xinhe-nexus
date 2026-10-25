@@ -54,5 +54,16 @@ public class AttendanceController {
         return ApiResponse.success(service.listAll(user, companyId, from, to, userId, orgUnitId, keyword));
     }
 
+    @PostMapping("/records/punch")
+    public ApiResponse<Map<String, Object>> adminPunch(
+            @RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user,
+            HttpServletRequest request,
+            @RequestBody AdminPunchRequest body) {
+        return ApiResponse.success(service.adminPunch(user, body.companyId(), body.userId(), body.punchTime(),
+                request.getRemoteAddr(), request.getHeader("User-Agent"), body.remark()));
+    }
+
     public record PunchRequest(String remark) {}
+
+    public record AdminPunchRequest(Long companyId, long userId, String punchTime, String remark) {}
 }

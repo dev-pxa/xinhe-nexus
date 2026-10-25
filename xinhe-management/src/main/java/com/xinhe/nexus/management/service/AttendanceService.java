@@ -52,6 +52,37 @@ public class AttendanceService {
         return listSummaries(scopeCompany, userId, from, to, new Filter(orgUnitId, keyword));
     }
 
+    public Map<String, Object> adminPunch(
+            ManagementUser operator, Long companyId, long userId, String punchTime, String ip, String userAgent, String remark) {
+        ensureAdmin(operator);
+        Long targetCompany = "PLATFORM_ADMIN".equals(role(operator)) ? companyId : operator.companyId();
+        if (targetCompany == null) {
+            throw new IllegalArgumentException("请选择公司");
+        }
+        if (!"PLATFORM_ADMIN".equals(role(operator)) && !targetCompany.equals(operator.companyId())) {
+            throw new ManagementException(HttpStatus.FORBIDDEN, "不能为其他公司录入打卡");
+        }
+        Integer enabled = jdbcTemplate.queryForObject(
+                """
+                SELECT COUNT(*) FROM sys_user_company uc
+                JOIN sys_user u ON u.id = uc.user_id AND u.deleted_at IS NULL AND u.status = 'ENABLED'
+                WHERE uc.company_id = ? AND uc.user_id = ? AND uc.status = 'ENABLED' AND uc.deleted_at IS NULL
+                """, Integer.class, targetCompany, userId);
+        if (enabled == null || enabled == 0) {
+            throw new IllegalArgumentException("指定用户不属于当前公司或账号已停用");
+        }
+        LocalDateTime parsedTime = parsePunchTime(punchTime);
+        jdbcTemplate.update(
+                """
+                INSERT INTO oa_attendance_punch
+                    (company_id, user_id, punch_date, punch_time, punch_type, source, client_ip, user_agent, remark)
+                VALUES (?, ?, ?, ?, 'NORMAL', 'ADMIN', ?, ?, ?)
+                """, targetCompany, userId, parsedTime.toLocalDate(), parsedTime,
+                ip, truncate(userAgent, 512), truncate(remark, 255));
+        refreshSummary(targetCompany, userId, parsedTime.toLocalDate());
+        return findSummary(targetCompany, userId, parsedTime.toLocalDate());
+    }
+
     private List<Map<String, Object>> listSummaries(
             Long companyId, Long userId, LocalDate from, LocalDate to, Filter filter) {
         StringBuilder sql = new StringBuilder("""
@@ -147,6 +178,17 @@ public class AttendanceService {
     private String truncate(String value, int max) {
         if (value == null) return null;
         return value.length() <= max ? value : value.substring(0, max);
+    }
+
+    private LocalDateTime parsePunchTime(String value) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("请输入打卡时间");
+        }
+        try {
+            return LocalDateTime.parse(value.trim().replace(' ', 'T'));
+        } catch (RuntimeException exception) {
+            throw new IllegalArgumentException("打卡时间格式不正确");
+        }
     }
 
     private record Filter(Long orgUnitId, String keyword) {}
