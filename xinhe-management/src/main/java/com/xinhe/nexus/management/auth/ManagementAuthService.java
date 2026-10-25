@@ -61,7 +61,7 @@ public class ManagementAuthService {
         if (user == null) {
             return new LoginResult(null, "账号信息异常，请联系管理员");
         }
-        Duration ttl = request.remember() ? REMEMBERED_SESSION_TTL : DEFAULT_SESSION_TTL;
+        Duration ttl = Boolean.TRUE.equals(request.remember()) ? REMEMBERED_SESSION_TTL : DEFAULT_SESSION_TTL;
         String token = UUID.randomUUID().toString().replace("-", "");
         redisTemplate.opsForValue().set(
                 AuthConstants.SESSION_KEY_PREFIX + token,
