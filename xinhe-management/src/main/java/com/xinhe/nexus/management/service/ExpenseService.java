@@ -158,6 +158,15 @@ public class ExpenseService {
     }
 
     @Transactional
+    public void delete(ManagementUser user, long claimId) {
+        Map<String, Object> claim = claim(user, claimId);
+        ensureDeletable(claim);
+        jdbcTemplate.update("UPDATE oa_expense_attachment SET deleted_at = NOW() WHERE claim_id = ? AND deleted_at IS NULL", claimId);
+        jdbcTemplate.update("DELETE FROM oa_expense_approval_node WHERE claim_id = ?", claimId);
+        jdbcTemplate.update("UPDATE oa_expense_claim SET deleted_at = NOW(), version = version + 1 WHERE id = ?", claimId);
+    }
+
+    @Transactional
     public void review(ManagementUser user, long claimId, String action, String opinion) {
         requireCompany(user);
         Map<String, Object> claim = jdbcTemplate.queryForMap("SELECT * FROM oa_expense_claim WHERE id = ? AND company_id = ? AND deleted_at IS NULL", claimId, user.companyId());
@@ -241,6 +250,10 @@ public class ExpenseService {
 
     private void ensureEditable(Map<String, Object> claim) {
         if (!"DRAFT".equals(claim.get("status")) && !"REJECTED".equals(claim.get("status"))) throw new IllegalArgumentException("当前状态不允许编辑");
+    }
+
+    private void ensureDeletable(Map<String, Object> claim) {
+        if (!"DRAFT".equals(claim.get("status")) && !"REJECTED".equals(claim.get("status"))) throw new IllegalArgumentException("只有草稿或已驳回的报销单可以删除");
     }
 
     private void requireCompany(ManagementUser user) {

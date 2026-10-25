@@ -57,6 +57,12 @@ public class ExpenseController {
         return ApiResponse.success(null);
     }
 
+    @DeleteMapping("/{id}")
+    public ApiResponse<Void> delete(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user, @PathVariable long id) {
+        service.delete(user, id);
+        return ApiResponse.success(null);
+    }
+
     @PostMapping("/{id}/review")
     public ApiResponse<Void> review(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user, @PathVariable long id, @RequestBody ReviewRequest body) {
         service.review(user, id, body.action(), body.opinion());
