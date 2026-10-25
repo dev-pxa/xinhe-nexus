@@ -34,12 +34,12 @@ public class AuthController {
             HttpServletRequest request,
             HttpServletResponse response
     ) {
-        ManagementUser user = authService.login(loginRequest, request, response);
-        if (user == null) {
+        ManagementAuthService.LoginResult result = authService.authenticate(loginRequest, request, response);
+        if (result.user() == null) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body(new ApiResponse<>(401, "用户名或密码错误，或账号当前不可用", null, null, Instant.now()));
+                    .body(new ApiResponse<>(401, result.message(), null, null, Instant.now()));
         }
-        return ResponseEntity.ok(ApiResponse.success(user));
+        return ResponseEntity.ok(ApiResponse.success(result.user()));
     }
 
     @GetMapping("/current")

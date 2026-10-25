@@ -33,23 +33,33 @@ public class ManagementAuthService {
     }
 
     public ManagementUser login(LoginRequest request, HttpServletRequest servletRequest, HttpServletResponse response) {
+        return authenticate(request, servletRequest, response).user();
+    }
+
+    public LoginResult authenticate(LoginRequest request, HttpServletRequest servletRequest, HttpServletResponse response) {
         if (request == null || request.username() == null || request.password() == null) {
-            return null;
+            return new LoginResult(null, "请输入用户名和密码");
         }
-        UserAccount account = userAccountRepository.findByUsername(request.username().trim());
-        if (account == null || !"ENABLED".equals(account.status())) {
-            return null;
+        String username = request.username().trim();
+        if (username.isBlank()) return new LoginResult(null, "请输入用户名");
+        if (request.password().isBlank()) return new LoginResult(null, "请输入密码");
+        UserAccount account = userAccountRepository.findByUsername(username);
+        if (account == null) {
+            return new LoginResult(null, "用户不存在");
+        }
+        if (!"ENABLED".equals(account.status())) {
+            return new LoginResult(null, "账号当前不可用");
         }
         if (account.lockedUntil() != null && account.lockedUntil().isAfter(LocalDateTime.now())) {
-            return null;
+            return new LoginResult(null, "账号已锁定，请稍后再试");
         }
         if (!passwordEncoder.matches(request.password(), account.passwordHash())) {
             userAccountRepository.recordLoginFailure(account.id(), account.loginFailedCount());
-            return null;
+            return new LoginResult(null, "密码错误");
         }
         ManagementUser user = userAccountRepository.toManagementUser(account);
         if (user == null) {
-            return null;
+            return new LoginResult(null, "账号信息异常，请联系管理员");
         }
         Duration ttl = request.remember() ? REMEMBERED_SESSION_TTL : DEFAULT_SESSION_TTL;
         String token = UUID.randomUUID().toString().replace("-", "");
@@ -59,7 +69,7 @@ public class ManagementAuthService {
         userAccountRepository.recordLoginSuccess(account.id());
         response.addHeader(HttpHeaders.SET_COOKIE,
                 sessionCookie(token, ttl, request.remember(), servletRequest.isSecure()).toString());
-        return user;
+        return new LoginResult(user, null);
     }
 
     public ManagementUser currentUser(HttpServletRequest request) {
@@ -137,6 +147,9 @@ public class ManagementAuthService {
 
     public void validatePassword(String password) {
         PasswordPolicy.validate(password);
+    }
+
+    public record LoginResult(ManagementUser user, String message) {
     }
 
     private String requireText(String value, String label, int maxLength) {
