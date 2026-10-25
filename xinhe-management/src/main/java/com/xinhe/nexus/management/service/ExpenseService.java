@@ -55,7 +55,7 @@ public class ExpenseService {
                 """
                 SELECT id, expense_category AS expenseCategory, expense_date AS expenseDate,
                        expense_location AS expenseLocation, amount, remark
-                FROM oa_expense_item WHERE claim_id = ? ORDER BY expense_category, id
+                FROM oa_expense_item WHERE claim_id = ? ORDER BY id
                 """, claimId));
         List<Map<String, Object>> attachments = jdbcTemplate.queryForList(
                 """
@@ -64,7 +64,7 @@ public class ExpenseService {
                 FROM oa_expense_attachment WHERE claim_id = ? AND deleted_at IS NULL ORDER BY id
                 """, claimId);
         claim.put("attachments", attachments);
-        claim.put("approvalNodes", jdbcTemplate.queryForList(
+        List<Map<String, Object>> approvalNodes = jdbcTemplate.queryForList(
                 """
                 SELECT n.id, n.sequence_no AS sequenceNo, n.org_unit_id AS orgUnitId,
                        o.org_name AS orgName, n.reviewer_user_id AS reviewerUserId,
@@ -73,7 +73,11 @@ public class ExpenseService {
                 LEFT JOIN sys_org_unit o ON o.id = n.org_unit_id
                 LEFT JOIN sys_user u ON u.id = n.reviewer_user_id
                 WHERE n.claim_id = ? ORDER BY n.sequence_no
-                """, claimId));
+                """, claimId);
+        if (approvalNodes.isEmpty() && ("DRAFT".equals(claim.get("status")) || "REJECTED".equals(claim.get("status")))) {
+            approvalNodes = approvalPreview(((Number) claim.get("companyId")).longValue(), ((Number) claim.get("applicantUserId")).longValue());
+        }
+        claim.put("approvalNodes", approvalNodes);
         return claim;
     }
 
@@ -100,15 +104,28 @@ public class ExpenseService {
                 throw new IllegalArgumentException("费用金额不能小于0");
             }
         }
-        jdbcTemplate.update("DELETE FROM oa_expense_item WHERE claim_id = ?", claimId);
+        List<Map<String, Object>> existingRows = jdbcTemplate.queryForList("SELECT id FROM oa_expense_item WHERE claim_id = ?", claimId);
+        java.util.Set<Long> submittedIds = new java.util.HashSet<>();
         BigDecimal total = BigDecimal.ZERO;
         for (ItemRequest item : items) {
-            jdbcTemplate.update(
-                    """
-                    INSERT INTO oa_expense_item (claim_id, expense_category, expense_date, expense_location, amount, remark)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """, claimId, item.expenseCategory(), item.expenseDate(), trim(item.expenseLocation()), item.amount(), trim(item.remark()));
+            if (item.id() != null) {
+                Number owned = (Number) jdbcTemplate.queryForMap("SELECT COUNT(*) AS count FROM oa_expense_item WHERE id = ? AND claim_id = ?", item.id(), claimId).get("count");
+                if (owned == null || owned.intValue() == 0) throw new IllegalArgumentException("费用明细不存在");
+                submittedIds.add(item.id());
+                jdbcTemplate.update("UPDATE oa_expense_item SET expense_category = ?, expense_date = ?, expense_location = ?, amount = ?, remark = ? WHERE id = ? AND claim_id = ?",
+                        item.expenseCategory(), item.expenseDate(), trim(item.expenseLocation()), item.amount(), trim(item.remark()), item.id(), claimId);
+            } else {
+                jdbcTemplate.update("INSERT INTO oa_expense_item (claim_id, expense_category, expense_date, expense_location, amount, remark) VALUES (?, ?, ?, ?, ?, ?)",
+                        claimId, item.expenseCategory(), item.expenseDate(), trim(item.expenseLocation()), item.amount(), trim(item.remark()));
+            }
             total = total.add(item.amount() == null ? BigDecimal.ZERO : item.amount());
+        }
+        for (Map<String, Object> existing : existingRows) {
+            long existingId = ((Number) existing.get("id")).longValue();
+            if (!submittedIds.contains(existingId) && items.stream().noneMatch(item -> item.id() != null && item.id() == existingId)) {
+                jdbcTemplate.update("UPDATE oa_expense_attachment SET deleted_at = NOW() WHERE item_id = ? AND claim_id = ? AND deleted_at IS NULL", existingId, claimId);
+                jdbcTemplate.update("DELETE FROM oa_expense_item WHERE id = ? AND claim_id = ?", existingId, claimId);
+            }
         }
         jdbcTemplate.update("UPDATE oa_expense_claim SET total_amount = ?, version = version + 1 WHERE id = ?", total, claimId);
         return detail(user, claimId);
@@ -124,24 +141,15 @@ public class ExpenseService {
                 "SELECT COUNT(*) AS count FROM oa_expense_item WHERE claim_id = ? AND (expense_date IS NULL OR expense_location IS NULL OR amount <= 0)",
                 claimId).get("count");
         if (invalid != null && invalid.longValue() > 0) throw new IllegalArgumentException("费用明细的日期、地点和金额必须填写完整");
+        List<Map<String, Object>> route = approvalPreview(user.companyId(), user.id());
+        if (route.isEmpty()) throw new IllegalArgumentException("未找到可用的部门负责人审核流程");
+        Map<String, Object> unconfigured = route.stream().filter(node -> node.get("reviewerUserId") == null).findFirst().orElse(null);
+        if (unconfigured != null) throw new IllegalArgumentException("审核流程未配置完整：" + unconfigured.get("orgName") + "缺少负责人");
         jdbcTemplate.update("DELETE FROM oa_expense_approval_node WHERE claim_id = ?", claimId);
-        Long orgId = jdbcTemplate.query(
-                "SELECT p.org_unit_id FROM sys_user_position up JOIN sys_position p ON p.id = up.position_id AND p.status = 'ENABLED' AND p.deleted_at IS NULL WHERE up.user_id = ? AND up.company_id = ? AND up.status = 'ENABLED' AND up.deleted_at IS NULL ORDER BY up.id LIMIT 1",
-                rs -> rs.next() ? rs.getLong(1) : null, user.id(), user.companyId());
         int sequence = 1;
-        Long currentOrg = orgId;
-        while (currentOrg != null) {
-            Map<String, Object> org = jdbcTemplate.queryForMap("SELECT parent_id AS parentId, manager_position_id AS managerPositionId FROM sys_org_unit WHERE id = ? AND company_id = ? AND deleted_at IS NULL", currentOrg, user.companyId());
-            Long positionId = org.get("managerPositionId") == null ? null : ((Number) org.get("managerPositionId")).longValue();
-            if (positionId != null) {
-                List<Map<String, Object>> reviewers = jdbcTemplate.queryForList(
-                        "SELECT up.user_id AS userId FROM sys_user_position up JOIN sys_user u ON u.id = up.user_id AND u.status = 'ENABLED' AND u.deleted_at IS NULL WHERE up.company_id = ? AND up.position_id = ? AND up.status = 'ENABLED' AND up.deleted_at IS NULL ORDER BY up.id LIMIT 1",
-                        user.companyId(), positionId);
-                if (!reviewers.isEmpty()) {
-                    jdbcTemplate.update("INSERT INTO oa_expense_approval_node (claim_id, sequence_no, org_unit_id, reviewer_user_id, reviewer_position_id) VALUES (?, ?, ?, ?, ?)", claimId, sequence++, currentOrg, reviewers.get(0).get("userId"), positionId);
-                }
-            }
-            currentOrg = org.get("parentId") == null ? null : ((Number) org.get("parentId")).longValue();
+        for (Map<String, Object> node : route) {
+            jdbcTemplate.update("INSERT INTO oa_expense_approval_node (claim_id, sequence_no, org_unit_id, reviewer_user_id, reviewer_position_id) VALUES (?, ?, ?, ?, ?)",
+                    claimId, sequence++, node.get("orgUnitId"), node.get("reviewerUserId"), node.get("reviewerPositionId"));
         }
         Long firstReviewer = jdbcTemplate.query(
                 "SELECT reviewer_user_id FROM oa_expense_approval_node WHERE claim_id = ? ORDER BY sequence_no LIMIT 1",
@@ -246,6 +254,37 @@ public class ExpenseService {
     private String trim(String value) { return value == null || value.isBlank() ? null : value.trim(); }
     private String extension(String name) { if (name == null || !name.contains(".")) return ""; return name.substring(name.lastIndexOf('.')).toLowerCase(); }
 
+    private List<Map<String, Object>> approvalPreview(long companyId, long applicantUserId) {
+        Long currentOrg = jdbcTemplate.query("SELECT p.org_unit_id FROM sys_user_position up JOIN sys_position p ON p.id = up.position_id AND p.status = 'ENABLED' AND p.deleted_at IS NULL WHERE up.user_id = ? AND up.company_id = ? AND up.status = 'ENABLED' AND up.deleted_at IS NULL ORDER BY up.id LIMIT 1",
+                rs -> rs.next() ? rs.getLong(1) : null, applicantUserId, companyId);
+        List<Map<String, Object>> nodes = new ArrayList<>();
+        int sequence = 1;
+        while (currentOrg != null) {
+            List<Map<String, Object>> orgRows = jdbcTemplate.queryForList("SELECT parent_id AS parentId, org_name AS orgName, manager_position_id AS managerPositionId FROM sys_org_unit WHERE id = ? AND company_id = ? AND deleted_at IS NULL", currentOrg, companyId);
+            if (orgRows.isEmpty()) break;
+            Map<String, Object> org = orgRows.get(0);
+            Long positionId = org.get("managerPositionId") == null ? null : ((Number) org.get("managerPositionId")).longValue();
+            Map<String, Object> node = new java.util.LinkedHashMap<>();
+            node.put("id", -sequence);
+            node.put("sequenceNo", sequence++);
+            node.put("orgUnitId", currentOrg);
+            node.put("orgName", org.get("orgName"));
+            node.put("reviewerPositionId", positionId);
+            node.put("status", "PENDING");
+            node.put("preview", true);
+            if (positionId == null) {
+                node.put("reviewerName", "待配置负责人");
+            } else {
+                List<Map<String, Object>> reviewers = jdbcTemplate.queryForList("SELECT up.user_id AS userId, u.display_name AS reviewerName FROM sys_user_position up JOIN sys_user u ON u.id = up.user_id AND u.status = 'ENABLED' AND u.deleted_at IS NULL WHERE up.company_id = ? AND up.position_id = ? AND up.status = 'ENABLED' AND up.deleted_at IS NULL ORDER BY up.id LIMIT 1", companyId, positionId);
+                if (reviewers.isEmpty()) node.put("reviewerName", "待配置负责人");
+                else { node.put("reviewerUserId", reviewers.get(0).get("userId")); node.put("reviewerName", reviewers.get(0).get("reviewerName")); }
+            }
+            nodes.add(node);
+            currentOrg = org.get("parentId") == null ? null : ((Number) org.get("parentId")).longValue();
+        }
+        return nodes;
+    }
+
     public record SaveRequest(List<ItemRequest> items) {}
-    public record ItemRequest(String expenseCategory, LocalDate expenseDate, String expenseLocation, BigDecimal amount, String remark) {}
+    public record ItemRequest(Long id, String expenseCategory, LocalDate expenseDate, String expenseLocation, BigDecimal amount, String remark) {}
 }
