@@ -90,4 +90,19 @@ class SchemaContractTest {
         assertTrue(sql.contains("first_punch_time DATETIME"));
         assertTrue(sql.contains("last_punch_time DATETIME"));
     }
+
+    @Test
+    void expenseTablesAreAddedByMigration() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream("/db/migration/V5__add_oa_expense_claim.sql")) {
+            assertTrue(stream != null, "OA报销迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_expense_claim"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_expense_item"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_expense_attachment"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_expense_approval_node"));
+        assertTrue(sql.contains("REJECTED已驳回"));
+    }
 }
