@@ -76,4 +76,18 @@ class SchemaContractTest {
         assertTrue(sql.contains("ALTER TABLE sys_org_unit"));
         assertTrue(sql.contains("ADD COLUMN manager_position_id"));
     }
+
+    @Test
+    void attendanceTablesAreAddedByMigration() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream("/db/migration/V4__add_oa_attendance_punch.sql")) {
+            assertTrue(stream != null, "OA打卡迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_attendance_punch"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_attendance_day_summary"));
+        assertTrue(sql.contains("first_punch_time DATETIME"));
+        assertTrue(sql.contains("last_punch_time DATETIME"));
+    }
 }
