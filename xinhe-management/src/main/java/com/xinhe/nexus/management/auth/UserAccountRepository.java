@@ -5,13 +5,17 @@ import java.sql.SQLException;
 import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.beans.factory.annotation.Value;
 
 @Repository
 public class UserAccountRepository {
     private final JdbcTemplate jdbcTemplate;
+    private final String headquartersCode;
 
-    public UserAccountRepository(JdbcTemplate jdbcTemplate) {
+    public UserAccountRepository(JdbcTemplate jdbcTemplate,
+                                 @Value("${xinhe.bootstrap.headquarters-code:XINHE}") String headquartersCode) {
         this.jdbcTemplate = jdbcTemplate;
+        this.headquartersCode = headquartersCode;
     }
 
     public UserAccount findByUsername(String username) {
@@ -43,7 +47,7 @@ public class UserAccountRepository {
         }
         List<CompanyMembership> memberships = jdbcTemplate.query(
                 """
-                SELECT uc.company_id, c.company_name, uc.is_company_admin
+                SELECT uc.company_id, c.company_name, c.company_code, uc.is_company_admin
                 FROM sys_user_company uc
                 JOIN sys_company c ON c.id = uc.company_id AND c.deleted_at IS NULL
                 WHERE uc.user_id = ? AND uc.status = 'ENABLED' AND uc.deleted_at IS NULL
@@ -52,7 +56,7 @@ public class UserAccountRepository {
                 """,
                 (rs, rowNum) -> new CompanyMembership(
                         rs.getLong("company_id"), rs.getString("company_name"),
-                        rs.getBoolean("is_company_admin")), account.id());
+                        rs.getBoolean("is_company_admin"), rs.getString("company_code")), account.id());
         if (memberships.isEmpty()) {
             return null;
         }
@@ -79,7 +83,8 @@ public class UserAccountRepository {
         return new ManagementUser(
                 account.id(), membership.companyId(), membership.companyName(),
                 account.username(), account.displayName(), roles, permissions,
-                account.mustChangePassword(), account.authVersion());
+                account.mustChangePassword(), account.authVersion(),
+                headquartersCode.equalsIgnoreCase(membership.companyCode()));
     }
 
     public void recordLoginSuccess(long id) {
@@ -140,6 +145,6 @@ public class UserAccountRepository {
                 rs.getLong("auth_version"));
     }
 
-    private record CompanyMembership(long companyId, String companyName, boolean companyAdmin) {
+    private record CompanyMembership(long companyId, String companyName, boolean companyAdmin, String companyCode) {
     }
 }

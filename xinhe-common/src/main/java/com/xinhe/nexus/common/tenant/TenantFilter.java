@@ -29,6 +29,7 @@ public class TenantFilter extends OncePerRequestFilter {
                 || path.startsWith("/api/system/")
                 || path.startsWith("/api/oa/")
                 || path.startsWith("/api/app/system/")
+                || path.startsWith("/api/public/onboarding/forms/")
                 || path.startsWith("/actuator/");
     }
 

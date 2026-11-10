@@ -407,6 +407,68 @@ public class ManagementSystemService {
         audit(actor, companyId, "USER", "UPDATE", id);
     }
 
+    /**
+     * 按公司解除用户关系并软删除账号（仅当其已无其他有效公司关系时）。
+     * 历史业务记录保留原用户 ID，避免删除人员时破坏审计与业务归属信息。
+     */
+    @Transactional
+    public void deleteUser(ManagementUser actor, long userId, Long requestedCompanyId) {
+        requireManager(actor, "system:user:delete");
+        long companyId = resolveCompany(actor, requestedCompanyId);
+        if (actor.id() == userId) {
+            throw badRequest("不能删除当前登录用户");
+        }
+        List<Map<String, Object>> targets = jdbcTemplate.queryForList("""
+                SELECT u.user_type AS userType, uc.is_company_admin AS companyAdmin
+                FROM sys_user u JOIN sys_user_company uc ON uc.user_id = u.id
+                WHERE u.id = ? AND uc.company_id = ? AND u.deleted_at IS NULL
+                  AND uc.status = 'ENABLED' AND uc.deleted_at IS NULL
+                """, userId, companyId);
+        if (targets.isEmpty()) {
+            throw notFound("当前公司中不存在该有效用户");
+        }
+        Map<String, Object> target = targets.get(0);
+        if (!"COMPANY_USER".equals(target.get("userType"))) {
+            throw badRequest("不能删除平台管理员账号");
+        }
+        if (Boolean.TRUE.equals(target.get("companyAdmin")) || ((Number) target.get("companyAdmin")).intValue() == 1) {
+            requireAnotherCompanyAdmin(companyId, userId);
+        }
+
+        jdbcTemplate.update("""
+                UPDATE sys_user_company
+                SET status = 'DISABLED', left_at = COALESCE(left_at, NOW()), deleted_at = NOW(), updated_by = ?
+                WHERE user_id = ? AND company_id = ? AND status = 'ENABLED' AND deleted_at IS NULL
+                """, actor.id(), userId, companyId);
+        jdbcTemplate.update("""
+                UPDATE sys_user_position
+                SET status = 'DISABLED', updated_by = ?
+                WHERE user_id = ? AND company_id = ? AND status = 'ENABLED' AND deleted_at IS NULL
+                """, actor.id(), userId, companyId);
+        jdbcTemplate.update("""
+                UPDATE sys_org_unit SET manager_user_id = NULL, updated_by = ?
+                WHERE company_id = ? AND manager_user_id = ? AND deleted_at IS NULL
+                """, actor.id(), companyId, userId);
+
+        int remainingCompanies = count("""
+                SELECT COUNT(*) FROM sys_user_company
+                WHERE user_id = ? AND status = 'ENABLED' AND deleted_at IS NULL
+                """, userId);
+        if (remainingCompanies == 0) {
+            jdbcTemplate.update("""
+                    UPDATE sys_user SET status = 'DISABLED', deleted_at = NOW(),
+                        auth_version = auth_version + 1, version = version + 1, updated_by = ?
+                    WHERE id = ? AND deleted_at IS NULL
+                    """, actor.id(), userId);
+        } else {
+            // 用户仍在其他公司任职，保留账号但递增版本使现有登录会话重新校验成员关系。
+            jdbcTemplate.update("UPDATE sys_user SET auth_version = auth_version + 1, updated_by = ? WHERE id = ? AND deleted_at IS NULL",
+                    actor.id(), userId);
+        }
+        incrementCompanyAuthVersion(companyId);
+        audit(actor, companyId, "USER", "DELETE", userId);
+    }
+
     @Transactional
     public void replaceUserPositions(ManagementUser actor, long companyId, long userId, UserPositions body) {
         requireManager(actor, "system:user:assign-position");

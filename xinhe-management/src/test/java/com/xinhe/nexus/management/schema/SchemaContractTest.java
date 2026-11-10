@@ -92,6 +92,21 @@ class SchemaContractTest {
     }
 
     @Test
+    void attendanceEnhancementsAreAddedByMigration() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream("/db/migration/V19__enhance_oa_attendance.sql")) {
+            assertTrue(stream != null, "OA考勤增强迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertTrue(sql.contains("operator_user_id BIGINT UNSIGNED"));
+        assertTrue(sql.contains("latitude DECIMAL(10,7)"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_attendance_correction_request"));
+        assertTrue(sql.contains("approver_user_id BIGINT UNSIGNED"));
+        assertTrue(sql.contains("oa:attendance:admin-punch"));
+        assertTrue(sql.contains("oa:attendance:correction:review"));
+    }
+
+    @Test
     void expenseTablesAreAddedByMigration() throws IOException {
         String sql;
         try (var stream = getClass().getResourceAsStream("/db/migration/V5__add_oa_expense_claim.sql")) {
@@ -104,5 +119,54 @@ class SchemaContractTest {
         assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_expense_attachment"));
         assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_expense_approval_node"));
         assertTrue(sql.contains("REJECTED已驳回"));
+    }
+
+    @Test
+    void productMasterIsEnhancedByMigration() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream("/db/migration/V11__enhance_erp_product_master.sql")) {
+            assertTrue(stream != null, "商品资料增强迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertTrue(sql.contains("CREATE TABLE erp_product_category"));
+        assertTrue(sql.contains("CREATE TABLE erp_number_sequence"));
+        assertTrue(sql.contains("ADD COLUMN model"));
+        assertTrue(sql.contains("ADD COLUMN specification"));
+        assertTrue(sql.contains("CONCAT('PRD-',LPAD"));
+        assertTrue(sql.contains("category_name_snapshot"));
+        assertTrue(sql.contains("product_model_snapshot"));
+        assertTrue(sql.contains("product_specification_snapshot"));
+    }
+
+    @Test
+    void crmSalesOrderPermissionsBelongToCrmSalesOrderMenu() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream(
+                "/db/migration/V15__move_crm_sales_order_permissions.sql")) {
+            assertTrue(stream != null, "CRM销售订单权限迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertTrue(sql.contains("'crm:sales-orders', '销售订单', 'MENU', 'CRM'"));
+        assertTrue(sql.contains("'crm:sales-order:view'"));
+        assertTrue(sql.contains("'crm:sales-order:create'"));
+        assertTrue(sql.contains("'crm:sales-order:approve'"));
+        assertTrue(sql.contains("module_code = 'CRM'"));
+    }
+
+    @Test
+    void fullLegacyCrmPositionsReceiveSalesOrderPermissions() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream(
+                "/db/migration/V16__backfill_crm_sales_order_permissions.sql")) {
+            assertTrue(stream != null, "CRM历史岗位销售订单权限补齐迁移必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertTrue(sql.contains("INSERT IGNORE INTO sys_position_permission"));
+        assertTrue(sql.contains("'crm:sales-order:create'"));
+        assertTrue(sql.contains("legacy_crm_permission"));
+        assertTrue(sql.contains("auth_version = auth_version + 1"));
     }
 }

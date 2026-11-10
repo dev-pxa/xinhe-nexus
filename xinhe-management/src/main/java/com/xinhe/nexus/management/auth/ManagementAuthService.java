@@ -68,7 +68,7 @@ public class ManagementAuthService {
                 account.id() + ":" + account.authVersion(), ttl);
         userAccountRepository.recordLoginSuccess(account.id());
         response.addHeader(HttpHeaders.SET_COOKIE,
-                sessionCookie(token, ttl, request.remember(), servletRequest.isSecure()).toString());
+                sessionCookie(token, ttl, Boolean.TRUE.equals(request.remember()), servletRequest.isSecure()).toString());
         return new LoginResult(user, null);
     }
 

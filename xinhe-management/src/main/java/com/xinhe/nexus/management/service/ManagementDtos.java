@@ -51,4 +51,19 @@ public final class ManagementDtos {
 
     public record ResetPassword(String newPassword) {
     }
+
+    public record OnboardingInvitationCreate(String candidateName, Long departmentId, Long positionId, Integer expiresInDays) {
+    }
+
+    public record EducationInput(String startMonth, String endMonth, String educationLevel, String schoolName) {
+    }
+
+    public record OnboardingSubmit(
+            String gender, String birthDate, String idType, String idNumber,
+            String phone, String email, String address,
+            String emergencyContactName, String emergencyContactRelation, String emergencyContactPhone,
+            String username, String password, String confirmPassword,
+            List<EducationInput> educations
+    ) {
+    }
 }

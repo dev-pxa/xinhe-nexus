@@ -31,6 +31,7 @@ public class ManagementAuthFilter extends OncePerRequestFilter {
                 || path.equals("/api/auth/login")
                 || path.equals("/api/auth/logout")
                 || path.equals("/api/system/bootstrap")
+                || path.startsWith("/api/public/onboarding/forms/")
                 || path.startsWith("/actuator/");
     }
 

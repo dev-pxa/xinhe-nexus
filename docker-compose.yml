@@ -65,9 +65,11 @@ services:
       XINHE_HEADQUARTERS_NAME: ${XINHE_HEADQUARTERS_NAME:-芯河智枢总公司}
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-prod}
       XINHE_EXPENSE_UPLOAD_DIR: /data/uploads/expense
+      XINHE_CRM_UPLOAD_DIR: /data/uploads/crm
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - expense-uploads:/data/uploads/expense
+      - crm-uploads:/data/uploads/crm
     networks: [xinhe-network]
     restart: unless-stopped
 
@@ -104,6 +106,8 @@ volumes:
     name: xinhe-nexus-redis-data
   expense-uploads:
     name: xinhe-nexus-expense-uploads
+  crm-uploads:
+    name: xinhe-nexus-crm-uploads
 
 networks:
   xinhe-network:
