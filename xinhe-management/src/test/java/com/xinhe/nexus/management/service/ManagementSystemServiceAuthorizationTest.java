@@ -134,7 +134,7 @@ class ManagementSystemServiceAuthorizationTest {
                 ManagementException.class,
                 () -> service.createUser(user,
                         new ManagementDtos.UserCreate(
-                                null, "zhangsan", "张三", " ", null, false, List.of())));
+                                null, "zhangsan", "张三", " ", null, false, 1L)));
 
         assertEquals(HttpStatus.BAD_REQUEST, exception.status());
         assertEquals("手机号不能为空", exception.getMessage());

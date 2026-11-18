@@ -72,3 +72,28 @@ cp .env.example .env
 curl http://localhost:18081/actuator/health
 curl http://localhost:18083/actuator/health
 ```
+
+## 服务器与 GitHub Actions 部署
+
+与 `training` 共用服务器时，后端端口固定为管理 API `18081`、App API `18083`、
+MySQL `13306`、Redis `16379`，均不会与培训系统的 `8080`、`8082`、`3306`、`6379`
+（或其 pgvector `5432`）冲突。
+
+本机通过 SSH 发布：
+
+```bash
+chmod +x deploy/scripts/deploy-ssh.sh
+deploy/scripts/deploy-ssh.sh
+```
+
+`master` 分支推送会触发 GitHub Actions。配置本项目专用 Secrets：
+`NEXUS_SSH_HOST`、`NEXUS_SSH_USER`、`NEXUS_SSH_PORT`、`NEXUS_SSH_PRIVATE_KEY`、
+`NEXUS_MYSQL_ROOT_PASSWORD`、`NEXUS_REDIS_PASSWORD`；可选的 Repository Variable
+`NEXUS_BACKEND_DEPLOY_PATH` 默认是 `/opt/xinhe-nexus`。
+
+## 域名 API 入口
+
+管理端与 App API 不直接暴露为单独域名，而是由前端入口
+`http://nexus.glowlink.ren` 反向代理：管理端使用 `/api/...`，App 使用
+`/api/app/...`（例如 `http://nexus.glowlink.ren/api/app/system/ping`）。这样 Cookie
+会保持在同一站点，且无需开放后端的 `18081`、`18083` 给浏览器。

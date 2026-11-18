@@ -9,7 +9,8 @@ import com.xinhe.nexus.management.service.ManagementDtos.PositionPermissions;
 import com.xinhe.nexus.management.service.ManagementDtos.PositionSave;
 import com.xinhe.nexus.management.service.ManagementDtos.ResetPassword;
 import com.xinhe.nexus.management.service.ManagementDtos.UserCreate;
-import com.xinhe.nexus.management.service.ManagementDtos.UserPositions;
+import com.xinhe.nexus.management.service.ManagementDtos.UserPermissions;
+import com.xinhe.nexus.management.service.ManagementDtos.UserPosition;
 import com.xinhe.nexus.management.service.ManagementDtos.UserUpdate;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
@@ -341,7 +342,7 @@ public class ManagementSystemService {
                        u.last_login_at AS lastLoginAt, u.version,
                        uc.company_id AS companyId, c.company_name AS companyName,
                        uc.is_company_admin AS companyAdmin,
-                       GROUP_CONCAT(DISTINCT p.position_name ORDER BY p.position_name SEPARATOR '、') AS positionNames
+                       MAX(p.position_name) AS positionName
                 FROM sys_user u
                 JOIN sys_user_company uc ON uc.user_id = u.id
                     AND uc.status = 'ENABLED' AND uc.deleted_at IS NULL
@@ -376,8 +377,7 @@ public class ManagementSystemService {
                     (user_id, company_id, is_company_admin, status, created_by)
                 VALUES (?, ?, ?, 'ENABLED', ?)
                 """, userId, companyId, body.companyAdmin() ? 1 : 0, actor.id());
-        replaceUserPositions(actor, companyId, userId,
-                new UserPositions(body.positionIds() == null ? List.of() : body.positionIds()));
+        replaceUserPosition(actor, companyId, userId, new UserPosition(body.positionId()));
         audit(actor, companyId, "USER", "CREATE", userId);
         return Map.of("id", userId, "username", username);
     }
@@ -392,6 +392,9 @@ public class ManagementSystemService {
         String targetStatus = status(body.status());
         if (targetWasAdmin && (!targetWillAdmin || "DISABLED".equals(targetStatus))) {
             requireAnotherCompanyAdmin(companyId, id);
+        }
+        if (!targetWillAdmin && userPositionId(companyId, id) == null) {
+            throw badRequest("普通用户必须先分配岗位");
         }
         int changed = jdbcTemplate.update("""
                 UPDATE sys_user
@@ -445,6 +448,7 @@ public class ManagementSystemService {
                 SET status = 'DISABLED', updated_by = ?
                 WHERE user_id = ? AND company_id = ? AND status = 'ENABLED' AND deleted_at IS NULL
                 """, actor.id(), userId, companyId);
+        jdbcTemplate.update("DELETE FROM sys_user_permission WHERE company_id = ? AND user_id = ?", companyId, userId);
         jdbcTemplate.update("""
                 UPDATE sys_org_unit SET manager_user_id = NULL, updated_by = ?
                 WHERE company_id = ? AND manager_user_id = ? AND deleted_at IS NULL
@@ -470,20 +474,24 @@ public class ManagementSystemService {
     }
 
     @Transactional
-    public void replaceUserPositions(ManagementUser actor, long companyId, long userId, UserPositions body) {
+    public void replaceUserPosition(ManagementUser actor, long companyId, long userId, UserPosition body) {
         requireManager(actor, "system:user:assign-position");
         resolveCompany(actor, companyId);
         if (userCompany(userId) != companyId) {
             throw badRequest("用户不属于当前公司");
         }
-        List<Long> positionIds = body.positionIds() == null ? List.of() : body.positionIds().stream().distinct().toList();
-        for (Long positionId : positionIds) {
-            if (positionCompany(positionId) != companyId) {
-                throw badRequest("岗位不属于当前公司");
-            }
+        Long positionId = body == null ? null : body.positionId();
+        if (positionId == null && !isCompanyAdmin(userId, companyId)) {
+            throw badRequest("普通用户必须选择岗位");
+        }
+        if (positionId != null && (positionCompany(positionId) != companyId || count("""
+                SELECT COUNT(*) FROM sys_position
+                WHERE id=? AND company_id=? AND status='ENABLED' AND deleted_at IS NULL
+                """, positionId, companyId) == 0)) {
+            throw badRequest("岗位不存在、已停用或不属于当前公司");
         }
         jdbcTemplate.update("DELETE FROM sys_user_position WHERE company_id = ? AND user_id = ?", companyId, userId);
-        for (Long positionId : positionIds) {
+        if (positionId != null) {
             jdbcTemplate.update("""
                     INSERT INTO sys_user_position
                         (company_id, user_id, position_id, status, created_by)
@@ -551,10 +559,10 @@ public class ManagementSystemService {
         audit(actor, companyId, "POSITION", "SET_PERMISSION", positionId);
     }
 
-    public List<Map<String, Object>> listUserPositions(ManagementUser actor, long userId) {
+    public Map<String, Object> userPosition(ManagementUser actor, long userId) {
         long companyId = userCompany(userId);
         resolveCompany(actor, companyId);
-        return jdbcTemplate.queryForList("""
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
                 SELECT up.position_id AS positionId, p.position_code AS positionCode,
                        p.position_name AS positionName, p.org_unit_id AS orgUnitId,
                        o.org_name AS orgName
@@ -563,8 +571,70 @@ public class ManagementSystemService {
                 JOIN sys_org_unit o ON o.id = p.org_unit_id AND o.deleted_at IS NULL
                 WHERE up.company_id = ? AND up.user_id = ?
                   AND up.status = 'ENABLED' AND up.deleted_at IS NULL
-                ORDER BY p.position_name
                 """, companyId, userId);
+        return rows.isEmpty() ? Map.of() : rows.get(0);
+    }
+
+    public Map<String, Object> userPermissions(ManagementUser actor, long userId) {
+        requirePermissionAdministrator(actor);
+        long companyId = userCompany(userId);
+        resolveCompany(actor, companyId);
+        if (isCompanyAdmin(userId, companyId)) {
+            throw badRequest("公司管理员拥有全部权限，无需配置用户权限");
+        }
+        List<Long> positionIds = jdbcTemplate.queryForList("""
+                SELECT pp.permission_id
+                FROM sys_user_position up
+                JOIN sys_position_permission pp ON pp.company_id=up.company_id AND pp.position_id=up.position_id
+                JOIN sys_permission p ON p.id=pp.permission_id AND p.status='ENABLED' AND p.deleted_at IS NULL
+                WHERE up.company_id=? AND up.user_id=? AND up.status='ENABLED' AND up.deleted_at IS NULL
+                ORDER BY pp.permission_id
+                """, Long.class, companyId, userId);
+        List<Long> directIds = jdbcTemplate.queryForList("""
+                SELECT up.permission_id FROM sys_user_permission up
+                JOIN sys_permission p ON p.id=up.permission_id AND p.status='ENABLED' AND p.deleted_at IS NULL
+                WHERE up.company_id=? AND up.user_id=? ORDER BY up.permission_id
+                """, Long.class, companyId, userId);
+        List<Long> effectiveIds = java.util.stream.Stream.concat(positionIds.stream(), directIds.stream())
+                .distinct().sorted().toList();
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("positionId", userPositionId(companyId, userId));
+        result.put("positionPermissionIds", positionIds);
+        result.put("directPermissionIds", directIds);
+        result.put("effectivePermissionIds", effectiveIds);
+        return result;
+    }
+
+    @Transactional
+    public void replaceUserPermissions(ManagementUser actor, long userId, UserPermissions body) {
+        requirePermissionAdministrator(actor);
+        long companyId = userCompany(userId);
+        resolveCompany(actor, companyId);
+        if (isCompanyAdmin(userId, companyId)) {
+            throw badRequest("公司管理员拥有全部权限，无需配置用户权限");
+        }
+        List<Long> directIds = body == null || body.directPermissionIds() == null
+                ? List.of() : body.directPermissionIds().stream().distinct().toList();
+        for (Long permissionId : directIds) {
+            if (count("SELECT COUNT(*) FROM sys_permission WHERE id=? AND status='ENABLED' AND deleted_at IS NULL", permissionId) == 0) {
+                throw badRequest("权限节点不存在或已停用");
+            }
+        }
+        List<Long> inheritedIds = jdbcTemplate.queryForList("""
+                SELECT pp.permission_id FROM sys_user_position up
+                JOIN sys_position_permission pp ON pp.company_id=up.company_id AND pp.position_id=up.position_id
+                WHERE up.company_id=? AND up.user_id=? AND up.status='ENABLED' AND up.deleted_at IS NULL
+                """, Long.class, companyId, userId);
+        List<Long> storedIds = directIds.stream().filter(id -> !inheritedIds.contains(id)).toList();
+        jdbcTemplate.update("DELETE FROM sys_user_permission WHERE company_id=? AND user_id=?", companyId, userId);
+        for (Long permissionId : storedIds) {
+            jdbcTemplate.update("""
+                    INSERT INTO sys_user_permission (company_id,user_id,permission_id,created_by)
+                    VALUES (?,?,?,?)
+                    """, companyId, userId, permissionId, actor.id());
+        }
+        jdbcTemplate.update("UPDATE sys_user SET auth_version=auth_version+1 WHERE id=?", userId);
+        audit(actor, companyId, "USER", "SET_USER_PERMISSION", userId);
     }
 
     private void moveOrganization(long companyId, long id, long newParentId) {
@@ -679,6 +749,14 @@ public class ManagementSystemService {
                 """, userId, companyId) > 0;
     }
 
+    private Long userPositionId(long companyId, long userId) {
+        List<Long> values = jdbcTemplate.queryForList("""
+                SELECT position_id FROM sys_user_position
+                WHERE company_id=? AND user_id=? AND status='ENABLED' AND deleted_at IS NULL
+                """, Long.class, companyId, userId);
+        return values.isEmpty() ? null : values.get(0);
+    }
+
     private void requireAnotherCompanyAdmin(long companyId, long excludedUserId) {
         if (count("""
                 SELECT COUNT(*) FROM sys_user_company uc
@@ -739,6 +817,13 @@ public class ManagementSystemService {
             return;
         }
         throw new ManagementException(HttpStatus.FORBIDDEN, "没有执行该操作的权限");
+    }
+
+    private void requirePermissionAdministrator(ManagementUser actor) {
+        if (isPlatform(actor) || actor.roles().contains("COMPANY_ADMIN")) {
+            return;
+        }
+        throw new ManagementException(HttpStatus.FORBIDDEN, "仅平台管理员或公司管理员可以配置用户权限");
     }
 
     private void requirePlatform(ManagementUser actor) {

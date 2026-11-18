@@ -1,0 +1,75 @@
+name: Deploy Xinhe Nexus Backend
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-xinhe-nexus-backend
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      SSH_HOST: ${{ secrets.NEXUS_SSH_HOST }}
+      SSH_USER: ${{ secrets.NEXUS_SSH_USER }}
+      SSH_PORT: ${{ secrets.NEXUS_SSH_PORT }}
+      SSH_PRIVATE_KEY: ${{ secrets.NEXUS_SSH_PRIVATE_KEY }}
+      DEPLOY_PATH: ${{ vars.NEXUS_BACKEND_DEPLOY_PATH }}
+      MYSQL_ROOT_PASSWORD: ${{ secrets.NEXUS_MYSQL_ROOT_PASSWORD }}
+      REDIS_PASSWORD: ${{ secrets.NEXUS_REDIS_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate deployment script
+        run: bash -n deploy/scripts/deploy-ssh.sh
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${SSH_HOST:?Missing secret: NEXUS_SSH_HOST}"
+          : "${SSH_USER:?Missing secret: NEXUS_SSH_USER}"
+          : "${SSH_PRIVATE_KEY:?Missing secret: NEXUS_SSH_PRIVATE_KEY}"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/xinhe_nexus_deploy_key
+          chmod 600 ~/.ssh/xinhe_nexus_deploy_key
+          ssh-keyscan -p "${SSH_PORT:-22}" -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Generate production environment file
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${MYSQL_ROOT_PASSWORD:?Missing secret: NEXUS_MYSQL_ROOT_PASSWORD}"
+          : "${REDIS_PASSWORD:?Missing secret: NEXUS_REDIS_PASSWORD}"
+          umask 077
+          cat > .env <<EOF
+          MANAGEMENT_PORT=18081
+          APP_PORT=18083
+          MYSQL_PORT=13306
+          REDIS_PORT=16379
+          MYSQL_DATABASE=xinhe_nexus
+          MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+          REDIS_PASSWORD=${REDIS_PASSWORD}
+          XINHE_HEADQUARTERS_CODE=XINHE
+          XINHE_HEADQUARTERS_NAME=芯河智枢总公司
+          SPRING_PROFILES_ACTIVE=prod
+          TZ=Asia/Shanghai
+          EOF
+
+      - name: Deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SSH_PORT="${SSH_PORT:-22}"
+          export DEPLOY_PATH="${DEPLOY_PATH:-/opt/xinhe-nexus}"
+          export SSH_KEY_PATH="$HOME/.ssh/xinhe_nexus_deploy_key"
+          chmod +x deploy/scripts/deploy-ssh.sh
+          deploy/scripts/deploy-ssh.sh

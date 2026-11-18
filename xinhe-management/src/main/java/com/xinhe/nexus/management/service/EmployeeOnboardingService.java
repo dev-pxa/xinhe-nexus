@@ -4,6 +4,7 @@ import com.xinhe.nexus.management.auth.ManagementUser;
 import com.xinhe.nexus.management.auth.PasswordPolicy;
 import com.xinhe.nexus.management.service.ManagementDtos.EducationInput;
 import com.xinhe.nexus.management.service.ManagementDtos.OnboardingInvitationCreate;
+import com.xinhe.nexus.management.service.ManagementDtos.OnboardingInvitationRegenerate;
 import com.xinhe.nexus.management.service.ManagementDtos.OnboardingSubmit;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -12,6 +13,7 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -29,19 +31,23 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class EmployeeOnboardingService {
+    private static final ZoneId BUSINESS_ZONE = ZoneId.of("Asia/Shanghai");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final List<String> EDUCATION_LEVELS = List.of("HIGH_SCHOOL", "SECONDARY", "COLLEGE", "BACHELOR", "MASTER", "DOCTOR", "OTHER");
     private final JdbcTemplate db;
     private final PasswordEncoder passwordEncoder;
+    private final ProfileDataCrypto profileDataCrypto;
     private final SecretKeySpec tokenKey;
 
-    public EmployeeOnboardingService(JdbcTemplate db, PasswordEncoder passwordEncoder, @Value("${xinhe.onboarding.token-encryption-key:change-this-onboarding-token-key-in-production}") String tokenEncryptionKey) {
+    public EmployeeOnboardingService(JdbcTemplate db, PasswordEncoder passwordEncoder, ProfileDataCrypto profileDataCrypto, @Value("${xinhe.onboarding.token-encryption-key:change-this-onboarding-token-key-in-production}") String tokenEncryptionKey) {
         this.db = db;
         this.passwordEncoder = passwordEncoder;
+        this.profileDataCrypto = profileDataCrypto;
         this.tokenKey = new SecretKeySpec(sha256Bytes(tokenEncryptionKey), "AES");
     }
 
@@ -53,9 +59,9 @@ public class EmployeeOnboardingService {
         long companyId = actor.companyId();
         Integer valid = db.queryForObject("SELECT COUNT(*) FROM sys_position WHERE id=? AND company_id=? AND org_unit_id=? AND status='ENABLED' AND deleted_at IS NULL", Integer.class, input.positionId(), companyId, input.departmentId());
         if (valid == null || valid == 0) throw bad("部门与岗位不匹配或岗位不可用");
-        int days = input.expiresInDays() == null ? 7 : Math.max(1, Math.min(input.expiresInDays(), 30));
+        int days = normalizeExpiryDays(input.expiresInDays());
         String token = randomToken();
-        long id = insert("INSERT INTO hr_onboarding_invitation(company_id,candidate_name,department_id,position_id,token_hash,token_ciphertext,status,expires_at,created_by) VALUES(?,?,?,?,?,?, 'PENDING',?,?)", companyId, name, input.departmentId(), input.positionId(), hash(token), encryptToken(token), LocalDateTime.now().plusDays(days), actor.id());
+        long id = insert("INSERT INTO hr_onboarding_invitation(company_id,candidate_name,department_id,position_id,token_hash,token_ciphertext,status,expires_at,created_by) VALUES(?,?,?,?,?,?, 'PENDING',?,?)", companyId, name, input.departmentId(), input.positionId(), hash(token), encryptToken(token), now().plusDays(days), actor.id());
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("id", id); result.put("token", token); result.put("status", "PENDING"); result.put("expiresInDays", days);
         return result;
@@ -63,7 +69,7 @@ public class EmployeeOnboardingService {
 
     public List<Map<String, Object>> listInvitations(ManagementUser actor, String status) {
         requireAdmin(actor);
-        db.update("UPDATE hr_onboarding_invitation SET status='EXPIRED' WHERE company_id=? AND status='PENDING' AND expires_at < NOW()", actor.companyId());
+        expirePendingInvitations(actor.companyId());
         return db.queryForList("""
                 SELECT i.id, i.candidate_name AS candidateName, i.department_id AS departmentId,
                        o.org_name AS departmentName, i.position_id AS positionId, p.position_name AS positionName,
@@ -86,12 +92,13 @@ public class EmployeeOnboardingService {
     }
 
     @Transactional
-    public Map<String, Object> regenerate(ManagementUser actor, long id) {
+    public Map<String, Object> regenerate(ManagementUser actor, long id, OnboardingInvitationRegenerate input) {
         requireAdmin(actor);
         String token = randomToken();
-        int changed = db.update("UPDATE hr_onboarding_invitation SET token_hash=?,token_ciphertext=?,status='PENDING',expires_at=DATE_ADD(NOW(),INTERVAL 7 DAY),revoked_at=NULL,updated_at=NOW() WHERE id=? AND company_id=? AND status IN ('PENDING','EXPIRED','REVOKED')", hash(token), encryptToken(token), id, actor.companyId());
+        int days = normalizeExpiryDays(input == null ? null : input.expiresInDays());
+        int changed = db.update("UPDATE hr_onboarding_invitation SET token_hash=?,token_ciphertext=?,status='PENDING',expires_at=?,revoked_at=NULL,updated_at=? WHERE id=? AND company_id=? AND status IN ('PENDING','EXPIRED','REVOKED')", hash(token), encryptToken(token), now().plusDays(days), now(), id, actor.companyId());
         if (changed != 1) throw conflict("已提交表单不能重新生成链接");
-        return Map.of("id", id, "token", token, "status", "PENDING", "expiresInDays", 7);
+        return Map.of("id", id, "token", token, "status", "PENDING", "expiresInDays", days);
     }
 
     public Map<String, Object> currentLink(ManagementUser actor, long id) {
@@ -100,7 +107,10 @@ public class EmployeeOnboardingService {
         if (rows.isEmpty()) throw notFound("入职表单不存在");
         Map<String, Object> row = rows.get(0);
         if (!"PENDING".equals(row.get("status"))) throw conflict("只有待填写表单可以复制链接");
-        if (asLocalDateTime(row.get("expires_at")).isBefore(LocalDateTime.now())) throw conflict("表单已过期，请重新生成链接");
+        if (!asLocalDateTime(row.get("expires_at")).isAfter(now())) {
+            db.update("UPDATE hr_onboarding_invitation SET status='EXPIRED',updated_at=? WHERE id=? AND status='PENDING'", now(), id);
+            throw conflict("表单已过期，请重新生成链接");
+        }
         String ciphertext = (String) row.get("token_ciphertext");
         if (ciphertext == null || ciphertext.isBlank()) throw conflict("当前链接无法恢复，请重新生成链接");
         return Map.of("id", id, "token", decryptToken(ciphertext), "status", "PENDING");
@@ -111,9 +121,14 @@ public class EmployeeOnboardingService {
         List<Map<String, Object>> rows = db.queryForList("SELECT i.id,i.candidate_name AS candidateName,i.status,i.expires_at AS expiresAt,c.company_name AS companyName,o.org_name AS departmentName,p.position_name AS positionName FROM hr_onboarding_invitation i JOIN sys_company c ON c.id=i.company_id JOIN sys_org_unit o ON o.id=i.department_id JOIN sys_position p ON p.id=i.position_id WHERE i.token_hash=?", hash(token));
         if (rows.isEmpty()) throw notFound("表单不存在或已失效");
         Map<String, Object> row = rows.get(0);
-        if ("PENDING".equals(row.get("status")) && asLocalDateTime(row.get("expiresAt")).isBefore(LocalDateTime.now())) {
-            db.update("UPDATE hr_onboarding_invitation SET status='EXPIRED' WHERE id=? AND status='PENDING'", row.get("id"));
+        if ("PENDING".equals(row.get("status")) && !asLocalDateTime(row.get("expiresAt")).isAfter(now())) {
+            db.update("UPDATE hr_onboarding_invitation SET status='EXPIRED',updated_at=? WHERE id=? AND status='PENDING'", now(), row.get("id"));
             throw conflict("表单已过期");
+        }
+        if ("EXPIRED".equals(row.get("status"))) throw conflict("表单已过期，请联系管理员重新生成链接");
+        if ("REVOKED".equals(row.get("status"))) throw conflict("表单已撤销，请联系管理员重新生成链接");
+        if (!"PENDING".equals(row.get("status")) && !"SUBMITTED".equals(row.get("status"))) {
+            throw conflict("表单状态无效，请联系管理员重新生成链接");
         }
         return Map.of("candidateName", row.get("candidateName"), "companyName", row.get("companyName"), "departmentName", row.get("departmentName"), "positionName", row.get("positionName"), "expiresAt", row.get("expiresAt"), "status", row.get("status"));
     }
@@ -132,7 +147,7 @@ public class EmployeeOnboardingService {
         db.update("INSERT INTO sys_user_company(user_id,company_id,is_company_admin,status) VALUES(?,?,0,'ENABLED')", userId, companyId);
         long positionId = ((Number) row.get("positionId")).longValue();
         db.update("INSERT INTO sys_user_position(company_id,user_id,position_id,status) VALUES(?,?,?,'ENABLED')", companyId, userId, positionId);
-        long profileId = insert("INSERT INTO hr_employee_profile(invitation_id,user_id,company_id,candidate_name,gender,birth_date,id_type,id_number_hash,phone,email,address_ciphertext,emergency_contact_name,emergency_contact_relation,emergency_contact_phone,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'LOCKED')", invitationId, userId, companyId, name, trim(input.gender()), parseDate(input.birthDate()), trim(input.idType()), hashNullable(input.idNumber()), normalizePhone(input.phone()), trim(input.email()), trim(input.address()), trim(input.emergencyContactName()), trim(input.emergencyContactRelation()), normalizePhone(input.emergencyContactPhone()));
+        long profileId = insert("INSERT INTO hr_employee_profile(invitation_id,user_id,company_id,candidate_name,gender,birth_date,id_type,id_number_ciphertext,id_number_hash,phone,email,address_ciphertext,emergency_contact_name,emergency_contact_relation,emergency_contact_phone,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'LOCKED')", invitationId, userId, companyId, name, trim(input.gender()), parseDate(input.birthDate()), trim(input.idType()), profileDataCrypto.encrypt(input.idNumber()), hashNullable(input.idNumber()), normalizePhone(input.phone()), trim(input.email()), trim(input.address()), trim(input.emergencyContactName()), trim(input.emergencyContactRelation()), normalizePhone(input.emergencyContactPhone()));
         List<EducationInput> educations = normalizedEducations(input.educations());
         int order = 0;
         for (EducationInput education : educations) {
@@ -145,11 +160,13 @@ public class EmployeeOnboardingService {
 
     public Map<String, Object> detail(ManagementUser actor, long id) {
         requireAdmin(actor);
-        List<Map<String, Object>> rows = db.queryForList("SELECT ep.id,ep.candidate_name AS candidateName,ep.gender,ep.birth_date AS birthDate,ep.id_type AS idType,ep.id_number_hash AS idNumberHash,ep.phone,ep.email,ep.address_ciphertext AS address,ep.emergency_contact_name AS emergencyContactName,ep.emergency_contact_relation AS emergencyContactRelation,ep.emergency_contact_phone AS emergencyContactPhone,ep.status,ep.submitted_at AS submittedAt,u.username,o.org_name AS departmentName,p.position_name AS positionName FROM hr_employee_profile ep JOIN sys_user u ON u.id=ep.user_id JOIN hr_onboarding_invitation i ON i.id=ep.invitation_id JOIN sys_org_unit o ON o.id=i.department_id JOIN sys_position p ON p.id=i.position_id WHERE ep.company_id=? AND ep.id=?", actor.companyId(), id);
+        List<Map<String, Object>> rows = db.queryForList("SELECT ep.id,ep.candidate_name AS candidateName,ep.gender,ep.birth_date AS birthDate,ep.id_type AS idType,ep.id_number_ciphertext AS idNumberCiphertext,ep.phone,ep.email,ep.address_ciphertext AS address,ep.emergency_contact_name AS emergencyContactName,ep.emergency_contact_relation AS emergencyContactRelation,ep.emergency_contact_phone AS emergencyContactPhone,ep.status,ep.submitted_at AS submittedAt,u.username,o.org_name AS departmentName,p.position_name AS positionName FROM hr_employee_profile ep JOIN sys_user u ON u.id=ep.user_id JOIN hr_onboarding_invitation i ON i.id=ep.invitation_id JOIN sys_org_unit o ON o.id=i.department_id JOIN sys_position p ON p.id=i.position_id WHERE ep.company_id=? AND ep.id=?", actor.companyId(), id);
         if (rows.isEmpty()) throw new ManagementException(HttpStatus.NOT_FOUND, "人员档案不存在");
         Map<String, Object> result = new LinkedHashMap<>(rows.get(0));
+        result.put("idNumber", profileDataCrypto.mask(profileDataCrypto.decrypt((String) result.get("idNumberCiphertext"))));
         result.put("educations", db.queryForList("SELECT start_month AS startMonth,end_month AS endMonth,education_level AS educationLevel,school_name AS schoolName FROM hr_employee_education WHERE profile_id=? ORDER BY start_month DESC,end_month DESC,id DESC", id));
         result.remove("idNumberHash");
+        result.remove("idNumberCiphertext");
         return result;
     }
 
@@ -159,8 +176,8 @@ public class EmployeeOnboardingService {
         if (rows.isEmpty()) throw notFound("表单不存在或已失效");
         Map<String, Object> row = rows.get(0);
         if (!"PENDING".equals(row.get("status"))) throw conflict("该表单已提交或已失效");
-        if (asLocalDateTime(row.get("expiresAt")).isBefore(LocalDateTime.now())) {
-            db.update("UPDATE hr_onboarding_invitation SET status='EXPIRED' WHERE id=? AND status='PENDING'", row.get("id"));
+        if (!asLocalDateTime(row.get("expiresAt")).isAfter(now())) {
+            db.update("UPDATE hr_onboarding_invitation SET status='EXPIRED',updated_at=? WHERE id=? AND status='PENDING'", now(), row.get("id"));
             throw conflict("表单已过期");
         }
         return row;
@@ -222,6 +239,14 @@ public class EmployeeOnboardingService {
     }
     private LocalDate parseDate(String value) { if(value==null||value.isBlank()) return null; try{return LocalDate.parse(value);}catch(Exception e){throw bad("出生日期格式不正确");} }
     private LocalDateTime asLocalDateTime(Object value) { if (value instanceof LocalDateTime dateTime) return dateTime; if (value instanceof java.sql.Timestamp timestamp) return timestamp.toLocalDateTime(); throw new IllegalStateException("无法读取表单有效期"); }
+    private LocalDateTime now() { return LocalDateTime.now(BUSINESS_ZONE).withNano(0); }
+    private int normalizeExpiryDays(Integer days) { return days == null ? 7 : Math.max(1, Math.min(days, 30)); }
+    @Scheduled(fixedDelayString = "${xinhe.onboarding.expiry-cleanup-ms:300000}")
+    public void expirePendingInvitations() { expirePendingInvitations(null); }
+    private void expirePendingInvitations(Long companyId) {
+        if (companyId == null) db.update("UPDATE hr_onboarding_invitation SET status='EXPIRED',updated_at=? WHERE status='PENDING' AND expires_at <= ?", now(), now());
+        else db.update("UPDATE hr_onboarding_invitation SET status='EXPIRED',updated_at=? WHERE company_id=? AND status='PENDING' AND expires_at <= ?", now(), companyId, now());
+    }
     private String hashNullable(String value) { return trim(value) == null ? null : hash(value); }
     private String hash(String value) { try { return HexFormatHolder.hex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8))); } catch(Exception e) { throw new IllegalStateException(e); } }
     private byte[] sha256Bytes(String value) { try { return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)); } catch (NoSuchAlgorithmException e) { throw new IllegalStateException(e); } }

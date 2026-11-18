@@ -30,7 +30,7 @@ public final class ManagementDtos {
 
     public record UserCreate(
             Long companyId, String username, String displayName,
-            String phone, String email, boolean companyAdmin, List<Long> positionIds
+            String phone, String email, boolean companyAdmin, Long positionId
     ) {
     }
 
@@ -46,13 +46,19 @@ public final class ManagementDtos {
     public record PositionPermissions(List<Long> permissionIds) {
     }
 
-    public record UserPositions(List<Long> positionIds) {
+    public record UserPosition(Long positionId) {
+    }
+
+    public record UserPermissions(List<Long> directPermissionIds) {
     }
 
     public record ResetPassword(String newPassword) {
     }
 
     public record OnboardingInvitationCreate(String candidateName, Long departmentId, Long positionId, Integer expiresInDays) {
+    }
+
+    public record OnboardingInvitationRegenerate(Integer expiresInDays) {
     }
 
     public record EducationInput(String startMonth, String endMonth, String educationLevel, String schoolName) {

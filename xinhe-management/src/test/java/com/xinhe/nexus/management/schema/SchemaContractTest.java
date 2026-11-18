@@ -122,6 +122,21 @@ class SchemaContractTest {
     }
 
     @Test
+    void expenseApprovalIsHardenedByMigration() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream("/db/migration/V27__harden_expense_approval.sql")) {
+            assertTrue(stream != null, "报销审批增强迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertTrue(sql.contains("approval_round"));
+        assertTrue(sql.contains("node_type"));
+        assertTrue(sql.contains("org_name_snapshot"));
+        assertTrue(sql.contains("reviewer_name_snapshot"));
+        assertTrue(sql.contains("报销最终审批"));
+    }
+
+    @Test
     void productMasterIsEnhancedByMigration() throws IOException {
         String sql;
         try (var stream = getClass().getResourceAsStream("/db/migration/V11__enhance_erp_product_master.sql")) {
@@ -168,5 +183,21 @@ class SchemaContractTest {
         assertTrue(sql.contains("'crm:sales-order:create'"));
         assertTrue(sql.contains("legacy_crm_permission"));
         assertTrue(sql.contains("auth_version = auth_version + 1"));
+    }
+
+    @Test
+    void singlePositionAndDirectUserPermissionsAreAddedByMigration() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream(
+                "/db/migration/V26__single_position_and_user_permissions.sql")) {
+            assertTrue(stream != null, "单岗位与用户权限迁移必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS sys_user_permission"));
+        assertTrue(sql.contains("UNIQUE KEY uk_user_permission (company_id, user_id, permission_id)"));
+        assertTrue(sql.contains("DROP INDEX uk_user_position"));
+        assertTrue(sql.contains("active_user_id BIGINT UNSIGNED"));
+        assertTrue(sql.contains("UNIQUE KEY uk_company_active_user_position (company_id, active_user_id)"));
     }
 }

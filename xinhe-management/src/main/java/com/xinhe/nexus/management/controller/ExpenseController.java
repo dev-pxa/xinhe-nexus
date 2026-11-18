@@ -36,6 +36,11 @@ public class ExpenseController {
         return ApiResponse.success(service.listMine(user));
     }
 
+    @GetMapping("/pending")
+    public ApiResponse<List<Map<String, Object>>> pending(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user) {
+        return ApiResponse.success(service.listPending(user));
+    }
+
     @PostMapping
     public ApiResponse<Map<String, Object>> create(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user) {
         return ApiResponse.success(service.create(user));
@@ -52,8 +57,16 @@ public class ExpenseController {
     }
 
     @PostMapping("/{id}/submit")
-    public ApiResponse<Void> submit(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user, @PathVariable long id) {
-        service.submit(user, id);
+    public ApiResponse<Void> submit(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user,
+                                    @PathVariable long id, @RequestBody VersionRequest body) {
+        service.submit(user, id, body.version());
+        return ApiResponse.success(null);
+    }
+
+    @PostMapping("/{id}/withdraw")
+    public ApiResponse<Void> withdraw(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user,
+                                      @PathVariable long id, @RequestBody VersionRequest body) {
+        service.withdraw(user, id, body.version());
         return ApiResponse.success(null);
     }
 
@@ -65,7 +78,7 @@ public class ExpenseController {
 
     @PostMapping("/{id}/review")
     public ApiResponse<Void> review(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user, @PathVariable long id, @RequestBody ReviewRequest body) {
-        service.review(user, id, body.action(), body.opinion());
+        service.review(user, id, body.action(), body.opinion(), body.version());
         return ApiResponse.success(null);
     }
 
@@ -87,5 +100,6 @@ public class ExpenseController {
                 .body(resource);
     }
 
-    public record ReviewRequest(String action, String opinion) {}
+    public record VersionRequest(int version) {}
+    public record ReviewRequest(String action, String opinion, int version) {}
 }

@@ -67,19 +67,27 @@ public class UserAccountRepository {
                 ? List.of("*")
                 : jdbcTemplate.queryForList(
                         """
-                        SELECT DISTINCT p.permission_code
-                        FROM sys_user_position up
-                        JOIN sys_position pos ON pos.id = up.position_id
-                            AND pos.company_id = up.company_id
-                            AND pos.status = 'ENABLED' AND pos.deleted_at IS NULL
-                        JOIN sys_position_permission pp ON pp.position_id = pos.id
-                            AND pp.company_id = pos.company_id
-                        JOIN sys_permission p ON p.id = pp.permission_id
-                            AND p.status = 'ENABLED' AND p.deleted_at IS NULL
-                        WHERE up.user_id = ? AND up.company_id = ?
-                          AND up.status = 'ENABLED' AND up.deleted_at IS NULL
-                        ORDER BY p.permission_code
-                        """, String.class, account.id(), membership.companyId());
+                        SELECT permission_code FROM (
+                            SELECT p.permission_code
+                            FROM sys_user_position up
+                            JOIN sys_position pos ON pos.id = up.position_id
+                                AND pos.company_id = up.company_id
+                                AND pos.status = 'ENABLED' AND pos.deleted_at IS NULL
+                            JOIN sys_position_permission pp ON pp.position_id = pos.id
+                                AND pp.company_id = pos.company_id
+                            JOIN sys_permission p ON p.id = pp.permission_id
+                                AND p.status = 'ENABLED' AND p.deleted_at IS NULL
+                            WHERE up.user_id = ? AND up.company_id = ?
+                              AND up.status = 'ENABLED' AND up.deleted_at IS NULL
+                            UNION
+                            SELECT p.permission_code
+                            FROM sys_user_permission uperm
+                            JOIN sys_permission p ON p.id = uperm.permission_id
+                                AND p.status = 'ENABLED' AND p.deleted_at IS NULL
+                            WHERE uperm.user_id = ? AND uperm.company_id = ?
+                        ) effective_permissions
+                        ORDER BY permission_code
+                        """, String.class, account.id(), membership.companyId(), account.id(), membership.companyId());
         return new ManagementUser(
                 account.id(), membership.companyId(), membership.companyName(),
                 account.username(), account.displayName(), roles, permissions,
@@ -93,15 +101,8 @@ public class UserAccountRepository {
                 id);
     }
 
-    public void recordLoginFailure(long id, int currentFailures) {
-        int failures = currentFailures + 1;
-        if (failures >= 5) {
-            jdbcTemplate.update(
-                    "UPDATE sys_user SET login_failed_count = ?, locked_until = DATE_ADD(NOW(), INTERVAL 15 MINUTE) WHERE id = ?",
-                    failures, id);
-        } else {
-            jdbcTemplate.update("UPDATE sys_user SET login_failed_count = ? WHERE id = ?", failures, id);
-        }
+    public void recordLoginFailure(long id) {
+        jdbcTemplate.update("UPDATE sys_user SET login_failed_count = login_failed_count + 1 WHERE id = ?", id);
     }
 
     public void updatePassword(long id, String passwordHash) {
@@ -134,6 +135,13 @@ public class UserAccountRepository {
                     updated_by = ?, updated_at = NOW()
                 WHERE id = ? AND deleted_at IS NULL
                 """, displayName, phone, email, id, id);
+        // 账号基础资料与人员档案中的同名字段保持同一事务内同步。
+        jdbcTemplate.update(
+                """
+                UPDATE hr_employee_profile
+                SET candidate_name = ?, phone = ?, email = ?, updated_at = NOW()
+                WHERE user_id = ?
+                """, displayName, phone, email, id);
     }
 
     private UserAccount mapAccount(ResultSet rs, int rowNum) throws SQLException {

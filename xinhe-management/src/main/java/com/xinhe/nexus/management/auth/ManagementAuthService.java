@@ -4,7 +4,6 @@ import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.time.Duration;
-import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.UUID;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -45,17 +44,14 @@ public class ManagementAuthService {
         if (request.password().isBlank()) return new LoginResult(null, "请输入密码");
         UserAccount account = userAccountRepository.findByUsername(username);
         if (account == null) {
-            return new LoginResult(null, "用户不存在");
+            return new LoginResult(null, "用户名或密码错误");
         }
         if (!"ENABLED".equals(account.status())) {
-            return new LoginResult(null, "账号当前不可用");
-        }
-        if (account.lockedUntil() != null && account.lockedUntil().isAfter(LocalDateTime.now())) {
-            return new LoginResult(null, "账号已锁定，请稍后再试");
+            return new LoginResult(null, "用户名或密码错误");
         }
         if (!passwordEncoder.matches(request.password(), account.passwordHash())) {
-            userAccountRepository.recordLoginFailure(account.id(), account.loginFailedCount());
-            return new LoginResult(null, "密码错误");
+            userAccountRepository.recordLoginFailure(account.id());
+            return new LoginResult(null, "用户名或密码错误");
         }
         ManagementUser user = userAccountRepository.toManagementUser(account);
         if (user == null) {

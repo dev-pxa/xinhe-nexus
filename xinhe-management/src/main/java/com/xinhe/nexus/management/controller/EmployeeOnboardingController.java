@@ -5,6 +5,7 @@ import com.xinhe.nexus.management.auth.AuthConstants;
 import com.xinhe.nexus.management.auth.ManagementUser;
 import com.xinhe.nexus.management.service.EmployeeOnboardingService;
 import com.xinhe.nexus.management.service.ManagementDtos.OnboardingInvitationCreate;
+import com.xinhe.nexus.management.service.ManagementDtos.OnboardingInvitationRegenerate;
 import com.xinhe.nexus.management.service.ManagementDtos.OnboardingSubmit;
 import java.util.List;
 import java.util.Map;
@@ -32,7 +33,7 @@ public class EmployeeOnboardingController {
     @PostMapping("/invitations/{id}/revoke")
     public ApiResponse<Void> revoke(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user, @PathVariable long id) { service.revoke(user, id); return ApiResponse.success(null); }
     @PostMapping("/invitations/{id}/regenerate")
-    public ApiResponse<Map<String,Object>> regenerate(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user, @PathVariable long id) { return ApiResponse.success(service.regenerate(user, id)); }
+    public ApiResponse<Map<String,Object>> regenerate(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user, @PathVariable long id, @RequestBody(required = false) OnboardingInvitationRegenerate body) { return ApiResponse.success(service.regenerate(user, id, body)); }
     @GetMapping("/invitations/{id}/link")
     public ApiResponse<Map<String,Object>> link(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user, @PathVariable long id) { return ApiResponse.success(service.currentLink(user, id)); }
 }

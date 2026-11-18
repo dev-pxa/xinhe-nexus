@@ -5,7 +5,8 @@ import com.xinhe.nexus.management.auth.AuthConstants;
 import com.xinhe.nexus.management.auth.ManagementUser;
 import com.xinhe.nexus.management.service.ManagementDtos.ResetPassword;
 import com.xinhe.nexus.management.service.ManagementDtos.UserCreate;
-import com.xinhe.nexus.management.service.ManagementDtos.UserPositions;
+import com.xinhe.nexus.management.service.ManagementDtos.UserPermissions;
+import com.xinhe.nexus.management.service.ManagementDtos.UserPosition;
 import com.xinhe.nexus.management.service.ManagementDtos.UserUpdate;
 import com.xinhe.nexus.management.service.ManagementSystemService;
 import java.util.List;
@@ -67,22 +68,40 @@ public class UserController {
         return ApiResponse.success(null);
     }
 
-    @GetMapping("/{id}/positions")
-    public ApiResponse<List<Map<String, Object>>> positions(
+    @GetMapping("/{id}/position")
+    public ApiResponse<Map<String, Object>> position(
             @RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user,
             @PathVariable long id
     ) {
-        return ApiResponse.success(service.listUserPositions(user, id));
+        return ApiResponse.success(service.userPosition(user, id));
     }
 
-    @PutMapping("/{id}/positions")
-    public ApiResponse<Void> setPositions(
+    @PutMapping("/{id}/position")
+    public ApiResponse<Void> setPosition(
             @RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user,
             @PathVariable long id,
             @RequestParam long companyId,
-            @RequestBody UserPositions body
+            @RequestBody UserPosition body
     ) {
-        service.replaceUserPositions(user, companyId, id, body);
+        service.replaceUserPosition(user, companyId, id, body);
+        return ApiResponse.success(null);
+    }
+
+    @GetMapping("/{id}/permissions")
+    public ApiResponse<Map<String, Object>> permissions(
+            @RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user,
+            @PathVariable long id
+    ) {
+        return ApiResponse.success(service.userPermissions(user, id));
+    }
+
+    @PutMapping("/{id}/permissions")
+    public ApiResponse<Void> setPermissions(
+            @RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user,
+            @PathVariable long id,
+            @RequestBody UserPermissions body
+    ) {
+        service.replaceUserPermissions(user, id, body);
         return ApiResponse.success(null);
     }
 

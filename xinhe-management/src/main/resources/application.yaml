@@ -25,6 +25,8 @@ spring:
       max-request-size: 80MB
 
 xinhe:
+  onboarding:
+    expiry-cleanup-ms: ${XINHE_ONBOARDING_EXPIRY_CLEANUP_MS:300000}
   expense:
     upload-dir: ${XINHE_EXPENSE_UPLOAD_DIR:/data/uploads/expense}
   bootstrap:

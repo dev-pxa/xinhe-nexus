@@ -83,7 +83,7 @@ class ManagementAuthServiceTest {
                 new MockHttpServletRequest(), new MockHttpServletResponse());
 
         assertNull(user);
-        verify(accountRepository).recordLoginFailure(1L, 0);
+        verify(accountRepository).recordLoginFailure(1L);
         verifyNoInteractions(valueOperations);
     }
 

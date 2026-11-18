@@ -187,6 +187,7 @@ public class AttendanceService {
         return rows.isEmpty() ? Map.of("punchDate", date, "punchCount", 0, "status", "NO_RECORD") : rows.get(0);
     }
 
+    @Transactional
     public List<Map<String,Object>> createCorrection(ManagementUser user, CorrectionInput input) {
         ensureCompanyUser(user);
         if(input==null||input.requestedPunchTime()==null||input.requestedPunchTime().isBlank())throw bad("请输入补打卡时间");
@@ -195,7 +196,11 @@ public class AttendanceService {
         validateLocation(input, false);
         Integer duplicate=jdbcTemplate.queryForObject("SELECT COUNT(*) FROM oa_attendance_correction_request WHERE company_id=? AND user_id=? AND attendance_date=? AND status='PENDING'",Integer.class,user.companyId(),user.id(),time.toLocalDate());
         if(duplicate!=null&&duplicate>0)throw bad("该日期已有待审批的补打卡申请");
-        jdbcTemplate.update("INSERT INTO oa_attendance_correction_request(company_id,user_id,approver_user_id,attendance_date,punch_type,requested_punch_time,latitude,longitude,location_accuracy,location_source,location_address,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",user.companyId(),user.id(),approver,time.toLocalDate(),input.punchType()==null?"NORMAL":input.punchType(),time,input.latitude(),input.longitude(),input.accuracy(),input.locationSource(),trim(input.locationAddress()),input.reason().trim());
+        try {
+            jdbcTemplate.update("INSERT INTO oa_attendance_correction_request(company_id,user_id,approver_user_id,attendance_date,punch_type,requested_punch_time,latitude,longitude,location_accuracy,location_source,location_address,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",user.companyId(),user.id(),approver,time.toLocalDate(),input.punchType()==null?"NORMAL":input.punchType(),time,input.latitude(),input.longitude(),input.accuracy(),input.locationSource(),trim(input.locationAddress()),input.reason().trim());
+        } catch (org.springframework.dao.DuplicateKeyException exception) {
+            throw bad("该日期已有待审批的补打卡申请");
+        }
         return jdbcTemplate.queryForList("SELECT id,attendance_date attendanceDate,punch_type punchType,requested_punch_time requestedPunchTime,latitude,longitude,location_address locationAddress,status,reason FROM oa_attendance_correction_request WHERE company_id=? AND user_id=? ORDER BY id DESC",user.companyId(),user.id());
     }
 
