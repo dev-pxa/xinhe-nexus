@@ -138,14 +138,19 @@ REMOTE
 
 echo "Waiting for APIs..."
 for attempt in $(seq 1 24); do
-  MANAGEMENT_CODE="$("${SSH_CMD[@]}" "${SSH_USER}@${SSH_HOST}" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/api/auth/checkLogin" 2>/dev/null || echo 000)"
-  APP_CODE="$("${SSH_CMD[@]}" "${SSH_USER}@${SSH_HOST}" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18083/api/app/system/ping" 2>/dev/null || echo 000)"
-  if [[ "$MANAGEMENT_CODE" =~ ^(200|401|404)$ && "$APP_CODE" =~ ^(200|401|404)$ ]]; then
+  MANAGEMENT_CODE="$("${SSH_CMD[@]}" "${SSH_USER}@${SSH_HOST}" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/actuator/health" 2>/dev/null || echo 000)"
+  APP_CODE="$("${SSH_CMD[@]}" "${SSH_USER}@${SSH_HOST}" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18083/actuator/health" 2>/dev/null || echo 000)"
+  echo "  attempt ${attempt}/24: management=${MANAGEMENT_CODE}, app=${APP_CODE}"
+  if [[ "$MANAGEMENT_CODE" == "200" && "$APP_CODE" == "200" ]]; then
     echo "APIs are reachable: management=${MANAGEMENT_CODE}, app=${APP_CODE}"
     break
   fi
   if [[ "$attempt" -eq 24 ]]; then
     echo "APIs were not ready after 120 seconds: management=${MANAGEMENT_CODE}, app=${APP_CODE}" >&2
+    echo "Last management logs:" >&2
+    "${SSH_CMD[@]}" "${SSH_USER}@${SSH_HOST}" "docker logs --tail 80 xinhe-nexus-management" >&2 || true
+    echo "Last app logs:" >&2
+    "${SSH_CMD[@]}" "${SSH_USER}@${SSH_HOST}" "docker logs --tail 80 xinhe-nexus-app" >&2 || true
     exit 1
   fi
   sleep 5
