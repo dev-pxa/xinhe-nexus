@@ -107,6 +107,44 @@ class SchemaContractTest {
     }
 
     @Test
+    void attendanceDailySettlementIsAddedByMigration() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream("/db/migration/V30__materialize_daily_attendance.sql")) {
+            assertTrue(stream != null, "日考勤结算迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertTrue(sql.contains("day_type VARCHAR(24)"));
+        assertTrue(sql.contains("rule_revision INT"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_attendance_settlement_job"));
+        assertTrue(sql.contains("UNIQUE KEY uk_attendance_settlement_company_date"));
+    }
+
+    @Test
+    void attendanceUserRuleConfigurationIsTrackedByMigration() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream("/db/migration/V31__track_attendance_user_rule_configuration.sql")) {
+            assertTrue(stream != null, "员工年度规则配置状态迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_attendance_user_rule_config"));
+        assertTrue(sql.contains("UNIQUE KEY uk_attendance_user_rule_config"));
+        assertTrue(sql.contains("INSERT IGNORE INTO oa_attendance_user_rule_config"));
+    }
+
+    @Test
+    void attendanceHolidayBaselineIsPersistedByMigration() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream("/db/migration/V32__persist_attendance_holiday_baseline.sql")) {
+            assertTrue(stream != null, "个人放假历史折算基线迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertTrue(sql.contains("implicit_holiday_credit"));
+        assertTrue(sql.contains("baseline_date"));
+        assertTrue(sql.contains("MIN(configured_at)"));
+        assertTrue(sql.contains("MODIFY COLUMN baseline_date DATE NOT NULL"));
+    }
+
+    @Test
     void expenseTablesAreAddedByMigration() throws IOException {
         String sql;
         try (var stream = getClass().getResourceAsStream("/db/migration/V5__add_oa_expense_claim.sql")) {
@@ -199,5 +237,36 @@ class SchemaContractTest {
         assertTrue(sql.contains("DROP INDEX uk_user_position"));
         assertTrue(sql.contains("active_user_id BIGINT UNSIGNED"));
         assertTrue(sql.contains("UNIQUE KEY uk_company_active_user_position (company_id, active_user_id)"));
+    }
+
+    @Test
+    void planItemCollaboratorsAreAddedByMigration() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream(
+                "/db/migration/V28__add_plan_item_collaborator.sql")) {
+            assertTrue(stream != null, "计划项协作人迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertTrue(sql.contains("ALTER TABLE crm_daily_plan_item"));
+        assertTrue(sql.contains("ALTER TABLE crm_weekly_plan_item"));
+        assertTrue(sql.contains("collaborator_user_id BIGINT UNSIGNED NULL"));
+        assertTrue(sql.contains("idx_crm_daily_plan_item_collaborator"));
+        assertTrue(sql.contains("idx_crm_weekly_plan_item_collaborator"));
+    }
+
+    @Test
+    void annualAttendanceRulesAreVersionedAndAudited() throws IOException {
+        String sql;
+        try (var stream = getClass().getResourceAsStream("/db/migration/V29__add_annual_attendance_rules.sql")) {
+            assertTrue(stream != null, "年度考勤规则迁移文件必须存在");
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_attendance_rule_year"));
+        assertTrue(sql.contains("draft_revision"));
+        assertTrue(sql.contains("published_revision"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_attendance_company_holiday"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_attendance_user_holiday"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS oa_attendance_rule_change_log"));
     }
 }

@@ -7,6 +7,7 @@ import java.time.ZoneId;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -99,7 +100,7 @@ public class AttendanceService {
                 SELECT s.id, s.company_id AS companyId, s.user_id AS userId,
                        u.username, u.display_name AS displayName, MAX(o.org_name) AS orgName,
                        DATE_FORMAT(s.punch_date, '%Y-%m-%d') AS punchDate, s.first_punch_time AS firstPunchTime,
-                       s.last_punch_time AS lastPunchTime, s.punch_count AS punchCount, s.status
+                       s.last_punch_time AS lastPunchTime, s.punch_count AS punchCount, s.day_type AS dayType, s.status
                 FROM oa_attendance_day_summary s
                 JOIN sys_user u ON u.id = s.user_id AND u.deleted_at IS NULL
                 LEFT JOIN sys_user_company uc ON uc.user_id = s.user_id
@@ -134,43 +135,60 @@ public class AttendanceService {
             args.add(keyword);
         }
         sql.append(" GROUP BY s.id, s.company_id, s.user_id, u.username, u.display_name,");
-        sql.append(" s.punch_date, s.first_punch_time, s.last_punch_time, s.punch_count, s.status");
+        sql.append(" s.punch_date, s.first_punch_time, s.last_punch_time, s.punch_count, s.day_type, s.status");
         sql.append(" ORDER BY s.punch_date DESC, u.display_name, s.user_id LIMIT ? OFFSET ?");
         args.add(limit); args.add(offset);
         return jdbcTemplate.queryForList(sql.toString(), args.toArray());
     }
 
-    private void refreshSummary(long companyId, long userId, LocalDate date) {
-        jdbcTemplate.update(
-                """
-                INSERT INTO oa_attendance_day_summary
-                    (company_id, user_id, punch_date, first_punch_time, last_punch_time, punch_count, status)
-                SELECT ?, ?, ?, MIN(punch_time), MAX(punch_time), COUNT(*),
-                       CASE WHEN COUNT(*) = 1 THEN 'SINGLE' ELSE 'NORMAL' END
-                FROM oa_attendance_punch
-                WHERE company_id = ? AND user_id = ? AND punch_date = ?
-                ON DUPLICATE KEY UPDATE
-                    first_punch_time = VALUES(first_punch_time),
-                    last_punch_time = VALUES(last_punch_time),
-                    punch_count = VALUES(punch_count), status = VALUES(status), version = version + 1
-                """, companyId, userId, date, companyId, userId, date);
+    @Transactional
+    public Map<String,Object> recalculateDay(long companyId,long userId,LocalDate date){
+        return withDayLock(companyId, userId, date, () -> recalculateDayInternal(companyId, userId, date));
     }
+
+    private Map<String,Object> recalculateDayInternal(long companyId,long userId,LocalDate date){
+        List<Map<String,Object>> rules=jdbcTemplate.queryForList("SELECT id,published_revision publishedRevision FROM oa_attendance_rule_year WHERE company_id=? AND rule_year=? AND published_revision IS NOT NULL",companyId,date.getYear());
+        Long ruleId=null;Integer revision=null;boolean companyHoliday=false;boolean personalHoliday=false;boolean ruleConfigured=false;
+        if(!rules.isEmpty()){Map<String,Object> rule=rules.get(0);ruleId=((Number)rule.get("id")).longValue();revision=((Number)rule.get("publishedRevision")).intValue();Integer configured=jdbcTemplate.queryForObject("SELECT COUNT(*) FROM oa_attendance_user_rule_config WHERE rule_year_id=? AND revision=? AND user_id=?",Integer.class,ruleId,revision,userId);ruleConfigured=configured!=null&&configured>0;if(ruleConfigured){Integer companyCount=jdbcTemplate.queryForObject("SELECT COUNT(*) FROM oa_attendance_company_holiday WHERE rule_year_id=? AND revision=? AND holiday_date=?",Integer.class,ruleId,revision,date);Integer personalCount=jdbcTemplate.queryForObject("SELECT COUNT(*) FROM oa_attendance_user_holiday WHERE rule_year_id=? AND revision=? AND user_id=? AND holiday_date=?",Integer.class,ruleId,revision,userId,date);companyHoliday=companyCount!=null&&companyCount>0;personalHoliday=personalCount!=null&&personalCount>0;}}
+        Map<String,Object> punches=jdbcTemplate.queryForMap("SELECT MIN(punch_time) firstPunchTime,MAX(punch_time) lastPunchTime,COUNT(*) punchCount FROM oa_attendance_punch WHERE company_id=? AND user_id=? AND punch_date=?",companyId,userId,date);int count=((Number)punches.get("punchCount")).intValue();String dayType=companyHoliday?"COMPANY_HOLIDAY":personalHoliday?"PERSONAL_HOLIDAY":"WORKDAY";String status=ruleConfigured?resolveStatus(companyHoliday,personalHoliday,count):"RULE_MISSING";
+        jdbcTemplate.update("""
+            INSERT INTO oa_attendance_day_summary(company_id,user_id,punch_date,first_punch_time,last_punch_time,punch_count,day_type,status,rule_year_id,rule_revision,calculated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,NOW())
+            ON DUPLICATE KEY UPDATE first_punch_time=VALUES(first_punch_time),last_punch_time=VALUES(last_punch_time),punch_count=VALUES(punch_count),day_type=VALUES(day_type),status=VALUES(status),rule_year_id=VALUES(rule_year_id),rule_revision=VALUES(rule_revision),calculated_at=NOW(),version=version+1
+            """,companyId,userId,date,punches.get("firstPunchTime"),punches.get("lastPunchTime"),count,dayType,status,ruleId,revision);
+        return findSummary(companyId,userId,date);
+    }
+
+    static String resolveStatus(boolean companyHoliday,boolean personalHoliday,int punchCount){if(companyHoliday)return "COMPANY_HOLIDAY";if(personalHoliday)return "PERSONAL_HOLIDAY";if(punchCount==0)return "ABSENT";return punchCount==1?"SINGLE":"NORMAL";}
 
     @Transactional
     protected Map<String, Object> appendPunch(Long companyId, long userId, Long operatorUserId, LocalDate date,
             LocalDateTime punchTime, String punchType, String source, String ip, String userAgent,
             PunchInput input, Long correctionRequestId) {
-        jdbcTemplate.update("""
-                INSERT INTO oa_attendance_punch
-                    (company_id, user_id, operator_user_id, correction_request_id, punch_date, punch_time, punch_type, source,
-                     client_ip, user_agent, latitude, longitude, location_accuracy, location_source, client_captured_at, timezone, remark)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, companyId, userId, operatorUserId, correctionRequestId, date, punchTime, punchType, source,
-                ip, truncate(userAgent, 512), input == null ? null : input.latitude(), input == null ? null : input.longitude(),
-                input == null ? null : input.accuracy(), input == null ? null : input.locationSource(),
-                input == null ? null : parseCapturedAt(input.capturedAt()), SYSTEM_ZONE.getId(), input == null ? null : truncate(input.remark(), 255));
-        refreshSummary(companyId, userId, date);
-        return findSummary(companyId, userId, date);
+        return withDayLock(companyId, userId, date, () -> {
+            jdbcTemplate.update("""
+                    INSERT INTO oa_attendance_punch
+                        (company_id, user_id, operator_user_id, correction_request_id, punch_date, punch_time, punch_type, source,
+                         client_ip, user_agent, latitude, longitude, location_accuracy, location_source, client_captured_at, timezone, remark)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, companyId, userId, operatorUserId, correctionRequestId, date, punchTime, punchType, source,
+                    ip, truncate(userAgent, 512), input == null ? null : input.latitude(), input == null ? null : input.longitude(),
+                    input == null ? null : input.accuracy(), input == null ? null : input.locationSource(),
+                    input == null ? null : parseCapturedAt(input.capturedAt()), SYSTEM_ZONE.getId(), input == null ? null : truncate(input.remark(), 255));
+            return recalculateDayInternal(companyId,userId,date);
+        });
+    }
+
+    private <T> T withDayLock(long companyId, long userId, LocalDate date, Supplier<T> action) {
+        // The membership row is stable for historical employees and its row lock is held until
+        // the surrounding transaction commits. This serializes punch + summary calculation across
+        // normal punch, admin entry, correction approval and the nightly repair job.
+        jdbcTemplate.queryForList("""
+                SELECT id FROM sys_user_company
+                WHERE company_id=? AND user_id=?
+                ORDER BY id LIMIT 1 FOR UPDATE
+                """, companyId, userId);
+        return action.get();
     }
 
     private long countSummaries(Long companyId, Long userId, LocalDate from, LocalDate to, Filter filter) {

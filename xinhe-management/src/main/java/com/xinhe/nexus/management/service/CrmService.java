@@ -79,6 +79,11 @@ public class CrmService {
 
     /** 仅返回已具备客户查看权限的本公司员工，用作负责人/协作人下拉选择数据源。 */
     public List<Map<String,Object>> eligibleUsers(ManagementUser u){access(u,"crm:customer:view");return db.queryForList("SELECT DISTINCT us.id,us.display_name name FROM sys_user us JOIN sys_user_company uc ON uc.user_id=us.id LEFT JOIN sys_user_position up ON up.user_id=us.id AND up.company_id=uc.company_id AND up.status='ENABLED' AND up.deleted_at IS NULL LEFT JOIN sys_position_permission pp ON pp.position_id=up.position_id LEFT JOIN sys_permission pm ON pm.id=pp.permission_id WHERE uc.company_id=? AND uc.status='ENABLED' AND us.status='ENABLED' AND us.deleted_at IS NULL AND (pm.permission_code='crm:customer:view' OR EXISTS(SELECT 1 FROM sys_user_permission uperm JOIN sys_permission direct_pm ON direct_pm.id=uperm.permission_id WHERE uperm.company_id=uc.company_id AND uperm.user_id=us.id AND direct_pm.permission_code='crm:customer:view' AND direct_pm.status='ENABLED' AND direct_pm.deleted_at IS NULL) OR us.id=?) ORDER BY us.display_name",u.companyId(),u.id());}
+    /** 计划协作人只能从本公司已启用且实际具备计划管理权限的用户中选择。 */
+    public List<Map<String,Object>> planEligibleUsers(ManagementUser u){
+        access(u,"crm:plan:view");
+        return db.queryForList("SELECT DISTINCT us.id,us.display_name name FROM sys_user us JOIN sys_user_company uc ON uc.user_id=us.id LEFT JOIN sys_user_position up ON up.user_id=us.id AND up.company_id=uc.company_id AND up.status='ENABLED' AND up.deleted_at IS NULL LEFT JOIN sys_position_permission pp ON pp.position_id=up.position_id LEFT JOIN sys_permission pm ON pm.id=pp.permission_id WHERE uc.company_id=? AND uc.status='ENABLED' AND us.status='ENABLED' AND us.deleted_at IS NULL AND us.id<>? AND (uc.is_company_admin=1 OR pm.permission_code='crm:plan:view' OR EXISTS(SELECT 1 FROM sys_user_permission uperm JOIN sys_permission direct_pm ON direct_pm.id=uperm.permission_id WHERE uperm.company_id=uc.company_id AND uperm.user_id=us.id AND direct_pm.permission_code='crm:plan:view' AND direct_pm.status='ENABLED' AND direct_pm.deleted_at IS NULL)) ORDER BY us.display_name",u.companyId(),u.id());
+    }
     public List<Map<String,Object>> categories(ManagementUser u){access(u,"crm:customer:view");return db.queryForList("SELECT id,parent_id parentId,category_name categoryName,sort_order sortOrder FROM crm_customer_category WHERE company_id=? AND deleted_at IS NULL ORDER BY sort_order,category_name,id",u.companyId());}
     @Transactional public long createCategory(ManagementUser u,CategoryInput input){access(u,"crm:customer:create");String name=required(input.categoryName(),"分类名称");if(input.parentId()!=null&&db.queryForList("SELECT id FROM crm_customer_category WHERE company_id=? AND id=? AND deleted_at IS NULL",u.companyId(),input.parentId()).isEmpty())throw new ManagementException(HttpStatus.BAD_REQUEST,"上级分类不存在");return insert("INSERT INTO crm_customer_category(company_id,parent_id,category_name,created_by,updated_by) VALUES(?,?,?,?,?)",u.companyId(),input.parentId(),name,u.id(),u.id());}
     @Transactional public void setFavorite(ManagementUser u,long customerId,boolean favorite){access(u,"crm:customer:view");ensureCustomerVisible(u,customerId);if(favorite)db.update("INSERT INTO crm_customer_favorite(company_id,customer_id,user_id) VALUES(?,?,?) ON DUPLICATE KEY UPDATE deleted_at=NULL,updated_at=NOW()",u.companyId(),customerId,u.id());else db.update("UPDATE crm_customer_favorite SET deleted_at=NOW(),updated_at=NOW() WHERE company_id=? AND customer_id=? AND user_id=? AND deleted_at IS NULL",u.companyId(),customerId,u.id());}
@@ -162,7 +167,10 @@ public class CrmService {
             COUNT(DISTINCT i.customer_id) associatedCustomerCount,p.version
           FROM crm_daily_plan p LEFT JOIN sys_user u ON u.id=p.owner_user_id
           LEFT JOIN sys_user_company uc ON uc.user_id=p.owner_user_id AND uc.company_id=p.company_id
-          LEFT JOIN crm_daily_plan_item i ON i.daily_plan_id=p.id AND i.deleted_at IS NULL
+          LEFT JOIN crm_daily_plan_item i ON i.company_id=p.company_id AND i.deleted_at IS NULL AND
+            (i.daily_plan_id=p.id OR (i.collaborator_user_id=p.owner_user_id AND EXISTS(
+              SELECT 1 FROM crm_daily_plan source WHERE source.company_id=p.company_id AND source.id=i.daily_plan_id
+                AND source.plan_date=p.plan_date AND source.owner_user_id<>p.owner_user_id AND source.deleted_at IS NULL)))
           WHERE p.company_id=? AND p.plan_date>=? AND p.plan_date<? AND p.deleted_at IS NULL AND %s%s
           GROUP BY p.id,p.plan_date,p.owner_user_id,u.display_name,u.status,u.deleted_at,uc.status,uc.deleted_at,p.version ORDER BY p.plan_date DESC,u.display_name LIMIT ? OFFSET ?
           """.formatted(scope,ownerFilter),args.toArray());
@@ -173,13 +181,15 @@ public class CrmService {
         access(u,"crm:plan:view"); ensurePlanVisible(u,id);
         // 显式序列化为 ISO 日期字符串，避免 JDBC DATE 被 Jackson 转成 UTC 时间戳后跨日显示。
         Map<String,Object> head=db.queryForMap("SELECT p.id,DATE_FORMAT(p.plan_date,'%Y-%m-%d') planDate,p.owner_user_id ownerUserId,usr.display_name ownerName,CASE WHEN usr.status <> 'ENABLED' OR usr.deleted_at IS NOT NULL OR uc.status <> 'ENABLED' OR uc.deleted_at IS NOT NULL THEN 'DEPARTED' ELSE 'ACTIVE' END ownerStatus,p.version FROM crm_daily_plan p LEFT JOIN sys_user usr ON usr.id=p.owner_user_id LEFT JOIN sys_user_company uc ON uc.user_id=p.owner_user_id AND uc.company_id=p.company_id WHERE p.company_id=? AND p.id=? AND p.deleted_at IS NULL",u.companyId(),id);
-        List<Map<String,Object>> items=db.queryForList("SELECT id,content_html contentHtml,content_text contentText,customer_id customerId,remark,is_completed isCompleted,version,sort_order sortOrder FROM crm_daily_plan_item WHERE company_id=? AND daily_plan_id=? AND deleted_at IS NULL ORDER BY sort_order,id",u.companyId(),id);
+        long ownerId=((Number)head.get("ownerUserId")).longValue();
+        String planDate=(String)head.get("planDate");
+        List<Map<String,Object>> items=db.queryForList("SELECT i.id,i.content_html contentHtml,i.content_text contentText,i.customer_id customerId,i.collaborator_user_id collaboratorUserId,collab.display_name collaboratorName,source_owner.display_name sourceOwnerName,i.remark,i.is_completed isCompleted,i.version,i.sort_order sortOrder,CASE WHEN source.owner_user_id=? AND i.daily_plan_id=? THEN TRUE ELSE FALSE END editable FROM crm_daily_plan_item i JOIN crm_daily_plan source ON source.id=i.daily_plan_id AND source.company_id=i.company_id AND source.deleted_at IS NULL LEFT JOIN sys_user collab ON collab.id=i.collaborator_user_id LEFT JOIN sys_user source_owner ON source_owner.id=source.owner_user_id WHERE i.company_id=? AND i.deleted_at IS NULL AND (i.daily_plan_id=? OR (i.collaborator_user_id=? AND source.plan_date=? AND source.owner_user_id<>?)) ORDER BY CASE WHEN i.daily_plan_id=? THEN 0 ELSE 1 END,i.sort_order,i.id",u.id(),id,u.companyId(),id,ownerId,planDate,ownerId,id);
         head.put("items",items);return head;
     }
     public List<Map<String,Object>> dailyPlanDraftItems(ManagementUser u) {
         // 先定位目标日期之前最近的一条每日计划，再只带出该计划的未完成项；中间空档或请假不会改变来源计划。
         access(u,"crm:plan:create"); LocalDate today=LocalDate.now(BUSINESS_ZONE);
-        return db.queryForList("SELECT i.content_html contentHtml,CASE WHEN c.id IS NOT NULL AND c.owner_user_id=? THEN i.customer_id ELSE NULL END customerId,i.remark FROM crm_daily_plan p JOIN crm_daily_plan_item i ON i.daily_plan_id=p.id AND i.company_id=p.company_id AND i.deleted_at IS NULL LEFT JOIN crm_customer c ON c.company_id=i.company_id AND c.id=i.customer_id AND c.deleted_at IS NULL WHERE p.company_id=? AND p.owner_user_id=? AND p.plan_date=(SELECT previous.plan_date FROM crm_daily_plan previous WHERE previous.company_id=? AND previous.owner_user_id=? AND previous.plan_date<? AND previous.deleted_at IS NULL ORDER BY previous.plan_date DESC,previous.id DESC LIMIT 1) AND p.deleted_at IS NULL AND i.is_completed=0 ORDER BY i.sort_order,i.id",u.id(),u.companyId(),u.id(),u.companyId(),u.id(),today);
+        return db.queryForList("SELECT i.content_html contentHtml,CASE WHEN c.id IS NOT NULL AND c.owner_user_id=? THEN i.customer_id ELSE NULL END customerId,i.collaborator_user_id collaboratorUserId,collab.display_name collaboratorName,i.remark FROM crm_daily_plan p JOIN crm_daily_plan_item i ON i.daily_plan_id=p.id AND i.company_id=p.company_id AND i.deleted_at IS NULL LEFT JOIN crm_customer c ON c.company_id=i.company_id AND c.id=i.customer_id AND c.deleted_at IS NULL LEFT JOIN sys_user collab ON collab.id=i.collaborator_user_id WHERE p.company_id=? AND p.owner_user_id=? AND p.plan_date=(SELECT previous.plan_date FROM crm_daily_plan previous WHERE previous.company_id=? AND previous.owner_user_id=? AND previous.plan_date<? AND previous.deleted_at IS NULL ORDER BY previous.plan_date DESC,previous.id DESC LIMIT 1) AND p.deleted_at IS NULL AND i.is_completed=0 ORDER BY i.sort_order,i.id",u.id(),u.companyId(),u.id(),u.companyId(),u.id(),today);
     }
     @Transactional public long createPlan(ManagementUser u,PlanInput in) {
         access(u,"crm:plan:create"); LocalDate today=LocalDate.now(BUSINESS_ZONE);
@@ -191,7 +201,7 @@ public class CrmService {
         replaceItems(u,id,in.items()); return id;
     }
     @Transactional public void updatePlan(ManagementUser u,long id,PlanInput in) { access(u,"crm:plan:edit"); ensurePlanEditable(u,id); replaceItems(u,id,in.items()); }
-    @Transactional public void deletePlan(ManagementUser u,long id) { access(u,"crm:plan:delete"); ensurePlanEditable(u,id); db.update("DELETE FROM crm_daily_plan_item WHERE company_id=? AND daily_plan_id=?",u.companyId(),id); db.update("DELETE FROM crm_daily_plan WHERE company_id=? AND id=?",u.companyId(),id); }
+    @Transactional public void deletePlan(ManagementUser u,long id) { access(u,"crm:plan:delete"); ensurePlanEditable(u,id);Map<String,Object> plan=db.queryForMap("SELECT owner_user_id,plan_date FROM crm_daily_plan WHERE company_id=? AND id=?",u.companyId(),id);if(!db.queryForList("SELECT 1 FROM crm_daily_plan_item i JOIN crm_daily_plan source ON source.id=i.daily_plan_id AND source.company_id=i.company_id WHERE i.company_id=? AND i.collaborator_user_id=? AND i.deleted_at IS NULL AND source.plan_date=? AND source.owner_user_id<>? AND source.deleted_at IS NULL LIMIT 1",u.companyId(),plan.get("owner_user_id"),plan.get("plan_date"),plan.get("owner_user_id")).isEmpty())throw new ManagementException(HttpStatus.CONFLICT,"当日计划包含他人分配的协作项，不能删除");db.update("DELETE FROM crm_daily_plan_item WHERE company_id=? AND daily_plan_id=?",u.companyId(),id); db.update("DELETE FROM crm_daily_plan WHERE company_id=? AND id=?",u.companyId(),id); }
     @Transactional public void completeItem(ManagementUser u,long itemId,boolean complete) { access(u,"crm:plan:complete"); Long planId=db.queryForObject("SELECT daily_plan_id FROM crm_daily_plan_item WHERE company_id=? AND id=? AND deleted_at IS NULL",Long.class,u.companyId(),itemId); ensurePlanEditable(u,planId); db.update("UPDATE crm_daily_plan_item SET is_completed=?,completed_at=?,completed_by=?,version=version+1 WHERE company_id=? AND id=?",complete?1:0,complete?java.sql.Timestamp.from(java.time.Instant.now()):null,complete?u.id():null,u.companyId(),itemId); }
 
     /** 每周计划以周一作为周期锚点，其他权限范围与每日计划保持一致。 */
@@ -207,7 +217,10 @@ public class CrmService {
             COUNT(DISTINCT i.customer_id) associatedCustomerCount,p.version
           FROM crm_weekly_plan p LEFT JOIN sys_user u ON u.id=p.owner_user_id
           LEFT JOIN sys_user_company uc ON uc.user_id=p.owner_user_id AND uc.company_id=p.company_id
-          LEFT JOIN crm_weekly_plan_item i ON i.weekly_plan_id=p.id AND i.deleted_at IS NULL
+          LEFT JOIN crm_weekly_plan_item i ON i.company_id=p.company_id AND i.deleted_at IS NULL AND
+            (i.weekly_plan_id=p.id OR (i.collaborator_user_id=p.owner_user_id AND EXISTS(
+              SELECT 1 FROM crm_weekly_plan source WHERE source.company_id=p.company_id AND source.id=i.weekly_plan_id
+                AND source.week_start=p.week_start AND source.owner_user_id<>p.owner_user_id AND source.deleted_at IS NULL)))
           WHERE p.company_id=? AND p.week_start<? AND DATE_ADD(p.week_start,INTERVAL 6 DAY)>=? AND p.deleted_at IS NULL AND %s%s
           GROUP BY p.id,p.week_start,p.owner_user_id,u.display_name,u.status,u.deleted_at,uc.status,uc.deleted_at,p.version ORDER BY p.week_start DESC,u.display_name LIMIT ? OFFSET ?
           """.formatted(scope,ownerFilter),args.toArray());
@@ -217,12 +230,14 @@ public class CrmService {
     public Map<String,Object> weeklyPlan(ManagementUser u,long id) {
         access(u,"crm:plan:view"); ensureWeeklyPlanVisible(u,id);
         Map<String,Object> head=db.queryForMap("SELECT p.id,DATE_FORMAT(p.week_start,'%Y-%m-%d') weekStart,DATE_FORMAT(DATE_ADD(p.week_start,INTERVAL 6 DAY),'%Y-%m-%d') weekEnd,p.owner_user_id ownerUserId,usr.display_name ownerName,CASE WHEN usr.status <> 'ENABLED' OR usr.deleted_at IS NOT NULL OR uc.status <> 'ENABLED' OR uc.deleted_at IS NOT NULL THEN 'DEPARTED' ELSE 'ACTIVE' END ownerStatus,p.version FROM crm_weekly_plan p LEFT JOIN sys_user usr ON usr.id=p.owner_user_id LEFT JOIN sys_user_company uc ON uc.user_id=p.owner_user_id AND uc.company_id=p.company_id WHERE p.company_id=? AND p.id=? AND p.deleted_at IS NULL",u.companyId(),id);
-        head.put("items",db.queryForList("SELECT id,content_html contentHtml,content_text contentText,customer_id customerId,remark,is_completed isCompleted,version,sort_order sortOrder FROM crm_weekly_plan_item WHERE company_id=? AND weekly_plan_id=? AND deleted_at IS NULL ORDER BY sort_order,id",u.companyId(),id)); return head;
+        long ownerId=((Number)head.get("ownerUserId")).longValue();
+        String weekStart=(String)head.get("weekStart");
+        head.put("items",db.queryForList("SELECT i.id,i.content_html contentHtml,i.content_text contentText,i.customer_id customerId,i.collaborator_user_id collaboratorUserId,collab.display_name collaboratorName,source_owner.display_name sourceOwnerName,i.remark,i.is_completed isCompleted,i.version,i.sort_order sortOrder,CASE WHEN source.owner_user_id=? AND i.weekly_plan_id=? THEN TRUE ELSE FALSE END editable FROM crm_weekly_plan_item i JOIN crm_weekly_plan source ON source.id=i.weekly_plan_id AND source.company_id=i.company_id AND source.deleted_at IS NULL LEFT JOIN sys_user collab ON collab.id=i.collaborator_user_id LEFT JOIN sys_user source_owner ON source_owner.id=source.owner_user_id WHERE i.company_id=? AND i.deleted_at IS NULL AND (i.weekly_plan_id=? OR (i.collaborator_user_id=? AND source.week_start=? AND source.owner_user_id<>?)) ORDER BY CASE WHEN i.weekly_plan_id=? THEN 0 ELSE 1 END,i.sort_order,i.id",u.id(),id,u.companyId(),id,ownerId,weekStart,ownerId,id)); return head;
     }
     public List<Map<String,Object>> weeklyPlanDraftItems(ManagementUser u) {
         // 先定位目标周期之前最近的一条每周计划，再只带出该计划的未完成项；不按上一周强制匹配。
         access(u,"crm:plan:create"); LocalDate monday=LocalDate.now(BUSINESS_ZONE).with(java.time.DayOfWeek.MONDAY);
-        return db.queryForList("SELECT i.content_html contentHtml,CASE WHEN c.id IS NOT NULL AND c.owner_user_id=? THEN i.customer_id ELSE NULL END customerId,i.remark FROM crm_weekly_plan p JOIN crm_weekly_plan_item i ON i.weekly_plan_id=p.id AND i.company_id=p.company_id AND i.deleted_at IS NULL LEFT JOIN crm_customer c ON c.company_id=i.company_id AND c.id=i.customer_id AND c.deleted_at IS NULL WHERE p.company_id=? AND p.owner_user_id=? AND p.week_start=(SELECT previous.week_start FROM crm_weekly_plan previous WHERE previous.company_id=? AND previous.owner_user_id=? AND previous.week_start<? AND previous.deleted_at IS NULL ORDER BY previous.week_start DESC,previous.id DESC LIMIT 1) AND p.deleted_at IS NULL AND i.is_completed=0 ORDER BY i.sort_order,i.id",u.id(),u.companyId(),u.id(),u.companyId(),u.id(),monday);
+        return db.queryForList("SELECT i.content_html contentHtml,CASE WHEN c.id IS NOT NULL AND c.owner_user_id=? THEN i.customer_id ELSE NULL END customerId,i.collaborator_user_id collaboratorUserId,collab.display_name collaboratorName,i.remark FROM crm_weekly_plan p JOIN crm_weekly_plan_item i ON i.weekly_plan_id=p.id AND i.company_id=p.company_id AND i.deleted_at IS NULL LEFT JOIN crm_customer c ON c.company_id=i.company_id AND c.id=i.customer_id AND c.deleted_at IS NULL LEFT JOIN sys_user collab ON collab.id=i.collaborator_user_id WHERE p.company_id=? AND p.owner_user_id=? AND p.week_start=(SELECT previous.week_start FROM crm_weekly_plan previous WHERE previous.company_id=? AND previous.owner_user_id=? AND previous.week_start<? AND previous.deleted_at IS NULL ORDER BY previous.week_start DESC,previous.id DESC LIMIT 1) AND p.deleted_at IS NULL AND i.is_completed=0 ORDER BY i.sort_order,i.id",u.id(),u.companyId(),u.id(),u.companyId(),u.id(),monday);
     }
     @Transactional public long createWeeklyPlan(ManagementUser u,PlanInput in) {
         access(u,"crm:plan:create"); LocalDate today=LocalDate.now(BUSINESS_ZONE); LocalDate monday=today.with(java.time.DayOfWeek.MONDAY);
@@ -232,15 +247,17 @@ public class CrmService {
         replaceWeeklyItems(u,id,in.items()); return id;
     }
     @Transactional public void updateWeeklyPlan(ManagementUser u,long id,PlanInput in) { access(u,"crm:plan:edit"); ensureWeeklyPlanEditable(u,id); replaceWeeklyItems(u,id,in.items()); }
-    @Transactional public void deleteWeeklyPlan(ManagementUser u,long id) { access(u,"crm:plan:delete"); ensureWeeklyPlanEditable(u,id); db.update("DELETE FROM crm_weekly_plan_item WHERE company_id=? AND weekly_plan_id=?",u.companyId(),id); db.update("DELETE FROM crm_weekly_plan WHERE company_id=? AND id=?",u.companyId(),id); }
+    @Transactional public void deleteWeeklyPlan(ManagementUser u,long id) { access(u,"crm:plan:delete"); ensureWeeklyPlanEditable(u,id);Map<String,Object> plan=db.queryForMap("SELECT owner_user_id,week_start FROM crm_weekly_plan WHERE company_id=? AND id=?",u.companyId(),id);if(!db.queryForList("SELECT 1 FROM crm_weekly_plan_item i JOIN crm_weekly_plan source ON source.id=i.weekly_plan_id AND source.company_id=i.company_id WHERE i.company_id=? AND i.collaborator_user_id=? AND i.deleted_at IS NULL AND source.week_start=? AND source.owner_user_id<>? AND source.deleted_at IS NULL LIMIT 1",u.companyId(),plan.get("owner_user_id"),plan.get("week_start"),plan.get("owner_user_id")).isEmpty())throw new ManagementException(HttpStatus.CONFLICT,"本周计划包含他人分配的协作项，不能删除");db.update("DELETE FROM crm_weekly_plan_item WHERE company_id=? AND weekly_plan_id=?",u.companyId(),id); db.update("DELETE FROM crm_weekly_plan WHERE company_id=? AND id=?",u.companyId(),id); }
     @Transactional public void completeWeeklyItem(ManagementUser u,long itemId,boolean complete) { access(u,"crm:plan:complete"); Long planId=db.queryForObject("SELECT weekly_plan_id FROM crm_weekly_plan_item WHERE company_id=? AND id=? AND deleted_at IS NULL",Long.class,u.companyId(),itemId); ensureWeeklyPlanEditable(u,planId); db.update("UPDATE crm_weekly_plan_item SET is_completed=?,completed_at=?,completed_by=?,version=version+1 WHERE company_id=? AND id=?",complete?1:0,complete?java.sql.Timestamp.from(java.time.Instant.now()):null,complete?u.id():null,u.companyId(),itemId); }
     private void replaceWeeklyItems(ManagementUser u,long planId,List<PlanItem> items) {
         if(items==null)items=List.of(); List<Long> retained=items.stream().filter(item->item.contentHtml()!=null&&!item.contentHtml().isBlank()).map(PlanItem::id).filter(java.util.Objects::nonNull).distinct().toList();
         if(retained.isEmpty())db.update("UPDATE crm_weekly_plan_item SET deleted_at=NOW() WHERE company_id=? AND weekly_plan_id=? AND deleted_at IS NULL",u.companyId(),planId);
         else db.update("UPDATE crm_weekly_plan_item SET deleted_at=NOW() WHERE company_id=? AND weekly_plan_id=? AND deleted_at IS NULL AND id NOT IN ("+String.join(",",retained.stream().map(x->"?").toList())+")",concat(new Object[]{u.companyId(),planId},retained.toArray()));
-        int order=0; for(PlanItem item:items){if(item.contentHtml()==null||item.contentHtml().isBlank())continue; Long customer=item.customerId(); if(customer!=null){ensureCustomerVisible(u,customer);Long owner=db.queryForObject("SELECT owner_user_id FROM crm_customer WHERE company_id=? AND id=? AND deleted_at IS NULL",Long.class,u.companyId(),customer);if(owner!=u.id())throw new ManagementException(HttpStatus.FORBIDDEN,"计划只能关联自己负责的客户");}String safe=sanitize(item.contentHtml());String text=safe.replaceAll("<[^>]*>"," ").replaceAll("\\s+"," ").trim();
-            if(item.id()!=null){int changed=db.update("UPDATE crm_weekly_plan_item SET content_html=?,content_text=?,customer_id=?,remark=?,sort_order=?,version=version+1 WHERE company_id=? AND weekly_plan_id=? AND id=? AND deleted_at IS NULL",safe,text,customer,trim(item.remark()),order++,u.companyId(),planId,item.id());if(changed!=1)throw new ManagementException(HttpStatus.BAD_REQUEST,"计划项无效或已被移除");}
-            else db.update("INSERT INTO crm_weekly_plan_item(company_id,weekly_plan_id,content_html,content_text,customer_id,remark,sort_order,created_by) VALUES(?,?,?,?,?,?,?,?)",u.companyId(),planId,safe,text,customer,trim(item.remark()),order++,u.id());
+        LocalDate weekStart=db.queryForObject("SELECT week_start FROM crm_weekly_plan WHERE company_id=? AND id=?",LocalDate.class,u.companyId(),planId);
+        int order=0; for(PlanItem item:items){if(item.contentHtml()==null||item.contentHtml().isBlank())continue; Long customer=item.customerId(); if(customer!=null){ensureCustomerVisible(u,customer);Long owner=db.queryForObject("SELECT owner_user_id FROM crm_customer WHERE company_id=? AND id=? AND deleted_at IS NULL",Long.class,u.companyId(),customer);if(owner!=u.id())throw new ManagementException(HttpStatus.FORBIDDEN,"计划只能关联自己负责的客户");}Long collaborator=validatedPlanCollaborator(u,item.collaboratorUserId());String safe=sanitize(item.contentHtml());String text=safe.replaceAll("<[^>]*>"," ").replaceAll("\\s+"," ").trim();
+            if(item.id()!=null){int changed=db.update("UPDATE crm_weekly_plan_item SET content_html=?,content_text=?,customer_id=?,collaborator_user_id=?,remark=?,sort_order=?,version=version+1 WHERE company_id=? AND weekly_plan_id=? AND id=? AND deleted_at IS NULL",safe,text,customer,collaborator,trim(item.remark()),order++,u.companyId(),planId,item.id());if(changed!=1)throw new ManagementException(HttpStatus.BAD_REQUEST,"计划项无效或已被移除");}
+            else insert("INSERT INTO crm_weekly_plan_item(company_id,weekly_plan_id,content_html,content_text,customer_id,collaborator_user_id,remark,sort_order,created_by) VALUES(?,?,?,?,?,?,?,?,?)",u.companyId(),planId,safe,text,customer,collaborator,trim(item.remark()),order++,u.id());
+            if(collaborator!=null)ensureWeeklyPlanForCollaborator(u,collaborator,weekStart,new java.util.HashSet<>());
         } db.update("UPDATE crm_weekly_plan SET updated_by=?,version=version+1 WHERE company_id=? AND id=?",u.id(),u.companyId(),planId);
     }
     private long countPlans(ManagementUser u,String scope,String dateCondition,Long ownerUserId,LocalDate from,LocalDate to){
@@ -264,16 +281,53 @@ public class CrmService {
         List<Long> retained=items.stream().filter(item->item.contentHtml()!=null&&!item.contentHtml().isBlank()).map(PlanItem::id).filter(java.util.Objects::nonNull).distinct().toList();
         if(retained.isEmpty())db.update("UPDATE crm_daily_plan_item SET deleted_at=NOW() WHERE company_id=? AND daily_plan_id=? AND deleted_at IS NULL",u.companyId(),planId);
         else db.update("UPDATE crm_daily_plan_item SET deleted_at=NOW() WHERE company_id=? AND daily_plan_id=? AND deleted_at IS NULL AND id NOT IN ("+String.join(",",retained.stream().map(x->"?").toList())+")",concat(new Object[]{u.companyId(),planId},retained.toArray()));
+        LocalDate planDate=db.queryForObject("SELECT plan_date FROM crm_daily_plan WHERE company_id=? AND id=?",LocalDate.class,u.companyId(),planId);
         int order=0;
         for(PlanItem item:items){if(item.contentHtml()==null||item.contentHtml().isBlank())continue;
             Long customer=item.customerId(); if(customer!=null){ensureCustomerVisible(u,customer); Long owner=db.queryForObject("SELECT owner_user_id FROM crm_customer WHERE company_id=? AND id=? AND deleted_at IS NULL",Long.class,u.companyId(),customer); if(owner!=u.id())throw new ManagementException(HttpStatus.FORBIDDEN,"计划只能关联自己负责的客户");}
+            Long collaborator=validatedPlanCollaborator(u,item.collaboratorUserId());
             String safe=sanitize(item.contentHtml());String text=safe.replaceAll("<[^>]*>"," ").replaceAll("\\s+"," ").trim();
             if(item.id()!=null){
-                int changed=db.update("UPDATE crm_daily_plan_item SET content_html=?,content_text=?,customer_id=?,remark=?,sort_order=?,version=version+1 WHERE company_id=? AND daily_plan_id=? AND id=? AND deleted_at IS NULL",safe,text,customer,trim(item.remark()),order++,u.companyId(),planId,item.id());
+                int changed=db.update("UPDATE crm_daily_plan_item SET content_html=?,content_text=?,customer_id=?,collaborator_user_id=?,remark=?,sort_order=?,version=version+1 WHERE company_id=? AND daily_plan_id=? AND id=? AND deleted_at IS NULL",safe,text,customer,collaborator,trim(item.remark()),order++,u.companyId(),planId,item.id());
                 if(changed!=1)throw new ManagementException(HttpStatus.BAD_REQUEST,"计划项无效或已被移除");
-            }else db.update("INSERT INTO crm_daily_plan_item(company_id,daily_plan_id,content_html,content_text,customer_id,remark,sort_order,created_by) VALUES(?,?,?,?,?,?,?,?)",u.companyId(),planId,safe,text,customer,trim(item.remark()),order++,u.id());
+            }else insert("INSERT INTO crm_daily_plan_item(company_id,daily_plan_id,content_html,content_text,customer_id,collaborator_user_id,remark,sort_order,created_by) VALUES(?,?,?,?,?,?,?,?,?)",u.companyId(),planId,safe,text,customer,collaborator,trim(item.remark()),order++,u.id());
+            if(collaborator!=null)ensureDailyPlanForCollaborator(u,collaborator,planDate,new java.util.HashSet<>());
         }
         db.update("UPDATE crm_daily_plan SET updated_by=?,version=version+1 WHERE company_id=? AND id=?",u.id(),u.companyId(),planId);
+    }
+    private Long validatedPlanCollaborator(ManagementUser u,Long userId){
+        if(userId==null)return null;
+        if(userId==u.id())throw new ManagementException(HttpStatus.BAD_REQUEST,"协作人不能是计划归属人本人");
+        if(db.queryForList("SELECT 1 FROM sys_user us JOIN sys_user_company uc ON uc.user_id=us.id WHERE us.id=? AND us.status='ENABLED' AND us.deleted_at IS NULL AND uc.company_id=? AND uc.status='ENABLED' AND (uc.is_company_admin=1 OR EXISTS(SELECT 1 FROM sys_permission pm WHERE pm.permission_code='crm:plan:view' AND pm.status='ENABLED' AND pm.deleted_at IS NULL AND (EXISTS(SELECT 1 FROM sys_user_position up JOIN sys_position_permission pp ON pp.position_id=up.position_id AND pp.company_id=up.company_id WHERE up.company_id=uc.company_id AND up.user_id=us.id AND up.status='ENABLED' AND up.deleted_at IS NULL AND pp.permission_id=pm.id) OR EXISTS(SELECT 1 FROM sys_user_permission direct WHERE direct.company_id=uc.company_id AND direct.user_id=us.id AND direct.permission_id=pm.id))))",userId,u.companyId()).isEmpty())throw new ManagementException(HttpStatus.BAD_REQUEST,"协作人必须是本公司已启用且具备计划管理权限的用户");
+        return userId;
+    }
+    private long ensureDailyPlanForCollaborator(ManagementUser operator,long ownerUserId,LocalDate date,java.util.Set<String> creating){
+        Long existing=db.query("SELECT id FROM crm_daily_plan WHERE company_id=? AND owner_user_id=? AND plan_date=? AND deleted_at IS NULL",rs->rs.next()?rs.getLong(1):null,operator.companyId(),ownerUserId,date);
+        if(existing!=null)return existing;
+        String key="D:"+ownerUserId+":"+date;
+        if(!creating.add(key))throw new ManagementException(HttpStatus.CONFLICT,"计划协作关系存在循环，无法自动创建计划");
+        long planId=insert("INSERT INTO crm_daily_plan(company_id,owner_user_id,owner_org_id,plan_date,created_by,updated_by) VALUES(?,?,(SELECT p.org_unit_id FROM sys_user_position up JOIN sys_position p ON p.id=up.position_id WHERE up.company_id=? AND up.user_id=? AND up.status='ENABLED' AND up.deleted_at IS NULL ORDER BY up.id LIMIT 1),?,?,?)",operator.companyId(),ownerUserId,operator.companyId(),ownerUserId,date,operator.id(),operator.id());
+        Long previous=db.query("SELECT id FROM crm_daily_plan WHERE company_id=? AND owner_user_id=? AND plan_date<? AND deleted_at IS NULL ORDER BY plan_date DESC,id DESC LIMIT 1",rs->rs.next()?rs.getLong(1):null,operator.companyId(),ownerUserId,date);
+        if(previous!=null){
+            db.update("INSERT INTO crm_daily_plan_item(company_id,daily_plan_id,content_html,content_text,customer_id,collaborator_user_id,remark,is_completed,sort_order,created_by) SELECT company_id,?,content_html,content_text,customer_id,collaborator_user_id,remark,0,sort_order,? FROM crm_daily_plan_item WHERE company_id=? AND daily_plan_id=? AND deleted_at IS NULL AND is_completed=0",planId,operator.id(),operator.companyId(),previous);
+            for(Long collaborator:db.queryForList("SELECT DISTINCT collaborator_user_id FROM crm_daily_plan_item WHERE company_id=? AND daily_plan_id=? AND collaborator_user_id IS NOT NULL AND deleted_at IS NULL",Long.class,operator.companyId(),planId))ensureDailyPlanForCollaborator(operator,collaborator,date,creating);
+        }
+        creating.remove(key);
+        return planId;
+    }
+    private long ensureWeeklyPlanForCollaborator(ManagementUser operator,long ownerUserId,LocalDate weekStart,java.util.Set<String> creating){
+        Long existing=db.query("SELECT id FROM crm_weekly_plan WHERE company_id=? AND owner_user_id=? AND week_start=? AND deleted_at IS NULL",rs->rs.next()?rs.getLong(1):null,operator.companyId(),ownerUserId,weekStart);
+        if(existing!=null)return existing;
+        String key="W:"+ownerUserId+":"+weekStart;
+        if(!creating.add(key))throw new ManagementException(HttpStatus.CONFLICT,"计划协作关系存在循环，无法自动创建计划");
+        long planId=insert("INSERT INTO crm_weekly_plan(company_id,owner_user_id,owner_org_id,week_start,created_by,updated_by) VALUES(?,?,(SELECT p.org_unit_id FROM sys_user_position up JOIN sys_position p ON p.id=up.position_id WHERE up.company_id=? AND up.user_id=? AND up.status='ENABLED' AND up.deleted_at IS NULL ORDER BY up.id LIMIT 1),?,?,?)",operator.companyId(),ownerUserId,operator.companyId(),ownerUserId,weekStart,operator.id(),operator.id());
+        Long previous=db.query("SELECT id FROM crm_weekly_plan WHERE company_id=? AND owner_user_id=? AND week_start<? AND deleted_at IS NULL ORDER BY week_start DESC,id DESC LIMIT 1",rs->rs.next()?rs.getLong(1):null,operator.companyId(),ownerUserId,weekStart);
+        if(previous!=null){
+            db.update("INSERT INTO crm_weekly_plan_item(company_id,weekly_plan_id,content_html,content_text,customer_id,collaborator_user_id,remark,is_completed,sort_order,created_by) SELECT company_id,?,content_html,content_text,customer_id,collaborator_user_id,remark,0,sort_order,? FROM crm_weekly_plan_item WHERE company_id=? AND weekly_plan_id=? AND deleted_at IS NULL AND is_completed=0",planId,operator.id(),operator.companyId(),previous);
+            for(Long collaborator:db.queryForList("SELECT DISTINCT collaborator_user_id FROM crm_weekly_plan_item WHERE company_id=? AND weekly_plan_id=? AND collaborator_user_id IS NOT NULL AND deleted_at IS NULL",Long.class,operator.companyId(),planId))ensureWeeklyPlanForCollaborator(operator,collaborator,weekStart,creating);
+        }
+        creating.remove(key);
+        return planId;
     }
     /**
      * 富文本采用小型 allow-list 净化：移除可执行容器、所有标签属性和非允许标签，
@@ -322,6 +376,6 @@ public class CrmService {
     private String trim(String s){return s==null||s.isBlank()?null:s.trim();} private String blankToNull(String s){return trim(s);}
     public record CustomerInput(String customerName,String phone,String address,String source,Long categoryId,Long ownerUserId,List<Long> collaboratorUserIds,String remark,Integer version){}
     public record CategoryInput(String categoryName,Long parentId){}
-    public record PlanInput(List<PlanItem> items){} public record PlanItem(Long id,String contentHtml,Long customerId,String remark){}
+    public record PlanInput(List<PlanItem> items){} public record PlanItem(Long id,String contentHtml,Long customerId,Long collaboratorUserId,String remark){}
     public record FollowupInput(String occurredAt,String method,String content,String customerFeedback,String quoteSummary,java.math.BigDecimal quoteAmount,String commitment,String nextAction,String nextActionAt){}
 }
