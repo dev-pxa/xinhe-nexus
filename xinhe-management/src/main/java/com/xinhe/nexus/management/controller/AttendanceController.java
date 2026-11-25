@@ -80,7 +80,7 @@ public class AttendanceController {
             HttpServletRequest request,
             @RequestBody AdminPunchRequest body) {
         return ApiResponse.success(service.adminPunch(user, body.companyId(), body.userId(), body.punchTime(),
-                request.getRemoteAddr(), request.getHeader("User-Agent"), new AttendanceService.AdminPunchInput(body.latitude(),body.longitude(),body.accuracy(),body.locationSource(),body.capturedAt(),body.remark())));
+                request.getRemoteAddr(), request.getHeader("User-Agent"), new AttendanceService.AdminPunchInput(body.latitude(),body.longitude(),body.accuracy(),body.locationSource(),body.capturedAt(),body.remark(),body.punchType())));
     }
 
     @PostMapping("/correction-requests")
@@ -92,6 +92,6 @@ public class AttendanceController {
     @PostMapping("/correction-requests/{id}/decision")
     public ApiResponse<Map<String,Object>> decideCorrection(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user,@PathVariable long id,@RequestBody Decision body){return ApiResponse.success(service.decideCorrection(user,id,body.approve(),body.comment()));}
 
-    public record AdminPunchRequest(Long companyId, long userId, String punchTime, java.math.BigDecimal latitude,java.math.BigDecimal longitude,java.math.BigDecimal accuracy,String locationSource,String capturedAt,String remark) {}
+    public record AdminPunchRequest(Long companyId, long userId, String punchTime, java.math.BigDecimal latitude,java.math.BigDecimal longitude,java.math.BigDecimal accuracy,String locationSource,String capturedAt,String remark,String punchType) {}
     public record Decision(boolean approve,String comment) {}
 }

@@ -43,6 +43,10 @@ public class ExpenseService {
                 SELECT id, claim_no AS claimNo, total_amount AS totalAmount, status,
                        current_reviewer_id AS currentReviewerId, submitted_at AS submittedAt,
                        approval_round AS approvalRound, version,
+                       (status='REVIEWING' AND current_reviewer_id IS NOT NULL AND EXISTS(
+                           SELECT 1 FROM oa_expense_approval_node n WHERE n.claim_id=oa_expense_claim.id
+                             AND n.approval_round=oa_expense_claim.approval_round AND n.sequence_no=1
+                             AND n.node_type='FINAL_APPROVER' AND n.status='PENDING')) AS directFinalApproval,
                        created_at AS createdAt, updated_at AS updatedAt
                 FROM oa_expense_claim
                 WHERE company_id = ? AND applicant_user_id = ? AND deleted_at IS NULL
@@ -67,9 +71,9 @@ public class ExpenseService {
                 WHERE c.company_id = ? AND c.deleted_at IS NULL
                   AND c.applicant_user_id <> ?
                   AND ((c.status = 'PENDING' AND c.current_reviewer_id = ?)
-                       OR (c.status = 'REVIEWING' AND ? = 1))
+                       OR (c.status = 'REVIEWING' AND ? = 1 AND (c.current_reviewer_id IS NULL OR c.current_reviewer_id=?)))
                 ORDER BY c.submitted_at, c.id
-                """, user.companyId(), user.id(), user.id(), finalApprover ? 1 : 0);
+                """, user.companyId(), user.id(), user.id(), finalApprover ? 1 : 0, user.id());
     }
 
     public Map<String, Object> detail(ManagementUser user, long claimId) {
@@ -176,16 +180,12 @@ public class ExpenseService {
                 claimId).get("count");
         if (invalid != null && invalid.longValue() > 0) throw new IllegalArgumentException("费用明细的日期、地点和金额必须填写完整");
         List<Map<String, Object>> route = approvalPreview(user.companyId(), user.id());
-        Map<String, Object> managerNode = route.stream()
-                .filter(node -> "DEPARTMENT_MANAGER".equals(node.get("nodeType"))).findFirst().orElse(null);
-        if (managerNode == null || managerNode.get("reviewerUserId") == null) {
-            throw new IllegalArgumentException("直属部门未配置有效负责人，无法提交报销");
+        Map<String,Object> firstNode = route.get(0);
+        if (firstNode.get("reviewerUserId") == null) {
+            throw new IllegalArgumentException("本部门及上级组织未配置有效负责人，无法提交报销");
         }
-        if (((Number) managerNode.get("reviewerUserId")).longValue() == user.id()) {
-            throw new IllegalArgumentException("申请人不能审批自己的报销，请联系管理员调整直属部门负责人");
-        }
-        List<Map<String, Object>> finalApprovers = finalApprovers(user.companyId(), user.id());
-        if (finalApprovers.isEmpty()) {
+        boolean directFinal = "FINAL_APPROVER".equals(firstNode.get("nodeType"));
+        if (finalApprovers(user.companyId(), user.id()).isEmpty()) {
             throw new IllegalArgumentException("未找到可用的报销最终审批人，请在权限配置中授予“报销最终审批”权限");
         }
         int nextRound = ((Number) claim.get("approvalRound")).intValue() + 1;
@@ -202,11 +202,11 @@ public class ExpenseService {
         }
         int updated = jdbcTemplate.update("""
                 UPDATE oa_expense_claim
-                SET status = 'PENDING', current_reviewer_id = ?, applicant_org_id = ?,
+                SET status = ?, current_reviewer_id = ?, applicant_org_id = ?,
                     approval_round = ?, submitted_at = NOW(), approved_at = NULL,
                     rejected_at = NULL, version = version + 1
                 WHERE id = ? AND version = ? AND status IN ('DRAFT', 'REJECTED')
-                """, managerNode.get("reviewerUserId"), managerNode.get("orgUnitId"),
+                """, directFinal ? "REVIEWING" : "PENDING", firstNode.get("reviewerUserId"), firstNode.get("applicantOrgId"),
                 nextRound, claimId, version);
         if (updated != 1) throw conflict();
     }
@@ -215,7 +215,8 @@ public class ExpenseService {
     public void withdraw(ManagementUser user, long claimId, int version) {
         Map<String, Object> claim = claim(user, claimId);
         requireVersion(claim, version);
-        if (!"PENDING".equals(claim.get("status"))) {
+        if (!"PENDING".equals(claim.get("status"))
+                && !isDirectFinalApproval(claim)) {
             throw new IllegalArgumentException("只有尚未发生审批的报销单可以撤回");
         }
         Number acted = (Number) jdbcTemplate.queryForMap(
@@ -228,8 +229,8 @@ public class ExpenseService {
                 UPDATE oa_expense_claim
                 SET status = 'DRAFT', current_reviewer_id = NULL, submitted_at = NULL,
                     version = version + 1
-                WHERE id = ? AND applicant_user_id = ? AND status = 'PENDING' AND version = ?
-                """, claimId, user.id(), version);
+                WHERE id = ? AND applicant_user_id = ? AND status = ? AND version = ?
+                """, claimId, user.id(), claim.get("status"), version);
         if (updated != 1) throw conflict();
         jdbcTemplate.update("""
                 UPDATE oa_expense_approval_node SET status = 'CANCELLED'
@@ -265,6 +266,9 @@ public class ExpenseService {
             }
         } else if ("REVIEWING".equals(status)) {
             requireFinalApprovePermission(user);
+            if (currentReviewer != null && currentReviewer != user.id()) {
+                throw new ManagementException(HttpStatus.FORBIDDEN, "当前报销单不在你的审核节点");
+            }
         } else {
             throw new IllegalArgumentException("当前状态不允许审批");
         }
@@ -291,16 +295,18 @@ public class ExpenseService {
                     WHERE id = ? AND version = ? AND status = ?
                     """, claimId, version, status);
             if (updated != 1) throw conflict();
+            cancelRemainingNodes(claimId, claim.get("approval_round"), "前序节点已驳回");
             return;
         }
-        if ("REVIEWING".equals(status)) {
+        if ("REVIEWING".equals(status) || canFinalApprove(user)) {
             int updated = jdbcTemplate.update("""
                     UPDATE oa_expense_claim
                     SET status = 'APPROVED', current_reviewer_id = NULL, approved_at = NOW(),
                         first_reviewed_at = COALESCE(first_reviewed_at, NOW()), version = version + 1
-                    WHERE id = ? AND version = ? AND status = 'REVIEWING'
-                    """, claimId, version);
+                    WHERE id = ? AND version = ? AND status = ?
+                    """, claimId, version, status);
             if (updated != 1) throw conflict();
+            cancelRemainingNodes(claimId, claim.get("approval_round"), "负责人已完成最终审批");
         } else {
             int updated = jdbcTemplate.update("""
                     UPDATE oa_expense_claim
@@ -310,6 +316,13 @@ public class ExpenseService {
                     """, claimId, version);
             if (updated != 1) throw conflict();
         }
+    }
+
+    private void cancelRemainingNodes(long claimId, Object round, String reason) {
+        jdbcTemplate.update("""
+                UPDATE oa_expense_approval_node SET status='CANCELLED',opinion=?
+                WHERE claim_id=? AND approval_round=? AND status='PENDING'
+                """, reason, claimId, round);
     }
 
     public long upload(ManagementUser user, long claimId, long itemId, String kind, MultipartFile file) {
@@ -367,7 +380,8 @@ public class ExpenseService {
         boolean historicalReviewer = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM oa_expense_approval_node WHERE claim_id = ? AND reviewer_user_id = ?",
                 Long.class, claimId, user.id()) > 0;
-        boolean finalReviewer = "REVIEWING".equals(row.get("status")) && canFinalApprove(user);
+        boolean finalReviewer = "REVIEWING".equals(row.get("status")) && canFinalApprove(user)
+                && (row.get("currentReviewerId") == null || reviewer == user.id());
         if (applicant != user.id() && reviewer != user.id() && !historicalReviewer && !finalReviewer
                 && !user.roles().contains("COMPANY_ADMIN") && !user.roles().contains("PLATFORM_ADMIN")) {
             throw new ManagementException(HttpStatus.FORBIDDEN, "无权查看该附件");
@@ -415,7 +429,8 @@ public class ExpenseService {
         boolean historicalReviewer = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM oa_expense_approval_node WHERE claim_id = ? AND reviewer_user_id = ?",
                 Long.class, claimId, user.id()) > 0;
-        boolean finalReviewer = "REVIEWING".equals(row.get("status")) && canFinalApprove(user);
+        boolean finalReviewer = "REVIEWING".equals(row.get("status")) && canFinalApprove(user)
+                && (row.get("currentReviewerId") == null || currentReviewer == user.id());
         if (applicant != user.id() && currentReviewer != user.id() && !historicalReviewer && !finalReviewer
                 && !user.roles().contains("COMPANY_ADMIN") && !user.roles().contains("PLATFORM_ADMIN")) {
             throw new ManagementException(HttpStatus.FORBIDDEN, "无权查看该报销单");
@@ -447,8 +462,19 @@ public class ExpenseService {
         return new ManagementException(HttpStatus.CONFLICT, "报销单已被其他人更新，请刷新后重试");
     }
 
+    private boolean isDirectFinalApproval(Map<String,Object> claim) {
+        if (!"REVIEWING".equals(claim.get("status")) || claim.get("currentReviewerId") == null) return false;
+        Integer nodes = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM oa_expense_approval_node
+                WHERE claim_id=? AND approval_round=? AND sequence_no=1
+                  AND node_type='FINAL_APPROVER' AND status='PENDING'
+                """, Integer.class, claim.get("id"), claim.get("approvalRound"));
+        return nodes != null && nodes == 1;
+    }
+
     private boolean canWithdraw(ManagementUser user, Map<String, Object> claim) {
-        if (((Number) claim.get("applicantUserId")).longValue() != user.id() || !"PENDING".equals(claim.get("status"))) return false;
+        if (((Number) claim.get("applicantUserId")).longValue() != user.id()) return false;
+        if (!"PENDING".equals(claim.get("status")) && !isDirectFinalApproval(claim)) return false;
         Number acted = (Number) jdbcTemplate.queryForMap(
                 "SELECT COUNT(*) AS count FROM oa_expense_approval_node WHERE claim_id = ? AND approval_round = ? AND acted_at IS NOT NULL",
                 claim.get("id"), claim.get("approvalRound")).get("count");
@@ -462,7 +488,8 @@ public class ExpenseService {
             return claim.get("currentReviewerId") != null
                     && ((Number) claim.get("currentReviewerId")).longValue() == user.id();
         }
-        return "REVIEWING".equals(claim.get("status")) && canFinalApprove(user);
+        return "REVIEWING".equals(claim.get("status")) && canFinalApprove(user)
+                && (claim.get("currentReviewerId") == null || ((Number) claim.get("currentReviewerId")).longValue() == user.id());
     }
 
     private boolean canFinalApprove(ManagementUser user) {
@@ -480,48 +507,32 @@ public class ExpenseService {
     private String extension(String name) { if (name == null || !name.contains(".")) return ""; return name.substring(name.lastIndexOf('.')).toLowerCase(); }
 
     private List<Map<String, Object>> approvalPreview(long companyId, long applicantUserId) {
-        Long currentOrg = jdbcTemplate.query("SELECT p.org_unit_id FROM sys_user_position up JOIN sys_position p ON p.id = up.position_id AND p.status = 'ENABLED' AND p.deleted_at IS NULL WHERE up.user_id = ? AND up.company_id = ? AND up.status = 'ENABLED' AND up.deleted_at IS NULL ORDER BY up.id LIMIT 1",
-                rs -> rs.next() ? rs.getLong(1) : null, applicantUserId, companyId);
-        List<Map<String, Object>> nodes = new ArrayList<>();
-        Map<String, Object> manager = new java.util.LinkedHashMap<>();
+        var superior = OrganizationApprovers.nearest(jdbcTemplate, companyId, applicantUserId, null);
+        List<Map<String,Object>> nodes = new ArrayList<>();
+        Map<String,Object> manager = new java.util.LinkedHashMap<>();
         manager.put("id", -1);
         manager.put("sequenceNo", 1);
         manager.put("nodeType", "DEPARTMENT_MANAGER");
-        manager.put("orgUnitId", currentOrg);
         manager.put("status", "PENDING");
         manager.put("preview", true);
-        if (currentOrg == null) {
-            manager.put("reviewerName", "待配置直属部门负责人");
-        } else {
-            List<Map<String, Object>> orgRows = jdbcTemplate.queryForList("""
-                    SELECT o.org_name AS orgName, o.manager_position_id AS managerPositionId,
-                           p.position_name AS reviewerPositionName
-                    FROM sys_org_unit o
-                    LEFT JOIN sys_position p ON p.id = o.manager_position_id
-                    WHERE o.id = ? AND o.company_id = ? AND o.deleted_at IS NULL
-                    """, currentOrg, companyId);
-            if (!orgRows.isEmpty()) {
-                Map<String, Object> org = orgRows.get(0);
-                manager.put("orgName", org.get("orgName"));
-                manager.put("reviewerPositionId", org.get("managerPositionId"));
-                manager.put("reviewerPositionName", org.get("reviewerPositionName"));
-                if (org.get("managerPositionId") != null) {
-                    List<Map<String, Object>> reviewers = jdbcTemplate.queryForList("""
-                            SELECT up.user_id AS userId, u.display_name AS reviewerName
-                            FROM sys_user_position up
-                            JOIN sys_user u ON u.id = up.user_id AND u.status = 'ENABLED' AND u.deleted_at IS NULL
-                            WHERE up.company_id = ? AND up.position_id = ?
-                              AND up.status = 'ENABLED' AND up.deleted_at IS NULL
-                            ORDER BY up.id LIMIT 1
-                            """, companyId, org.get("managerPositionId"));
-                    if (!reviewers.isEmpty()) {
-                        manager.put("reviewerUserId", reviewers.get(0).get("userId"));
-                        manager.put("reviewerName", reviewers.get(0).get("reviewerName"));
-                    }
-                }
+        manager.put("reviewerName", "待配置本部门或上级部门负责人");
+        var finals = finalApprovers(companyId, applicantUserId);
+        if (superior != null) {
+            manager.put("orgUnitId", superior.get("orgUnitId"));
+            manager.put("applicantOrgId", superior.get("applicantOrgId"));
+            manager.put("orgName", superior.get("orgName"));
+            manager.put("reviewerUserId", superior.get("id"));
+            manager.put("reviewerName", superior.get("name"));
+            manager.put("reviewerPositionId", superior.get("managerPositionId"));
+            manager.put("reviewerPositionName", superior.get("reviewerPositionName"));
+            boolean finalReviewer = finals.stream().anyMatch(row ->
+                    ((Number)row.get("userId")).longValue() == ((Number)superior.get("id")).longValue());
+            if (finalReviewer) {
+                manager.put("nodeType", "FINAL_APPROVER");
+                manager.put("reviewerPositionName", "报销最终审批");
+                return List.of(manager);
             }
         }
-        if (manager.get("reviewerName") == null) manager.put("reviewerName", "待配置直属部门负责人");
         nodes.add(manager);
 
         Map<String, Object> finalNode = new java.util.LinkedHashMap<>();
@@ -529,7 +540,7 @@ public class ExpenseService {
         finalNode.put("sequenceNo", 2);
         finalNode.put("nodeType", "FINAL_APPROVER");
         finalNode.put("orgName", "本公司");
-        finalNode.put("reviewerName", finalApprovers(companyId, applicantUserId).stream()
+        finalNode.put("reviewerName", finals.stream()
                 .map(row -> String.valueOf(row.get("reviewerName"))).reduce((left, right) -> left + "、" + right)
                 .orElse("待配置报销最终审批人"));
         finalNode.put("reviewerPositionName", "报销最终审批");

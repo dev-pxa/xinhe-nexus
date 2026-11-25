@@ -1,6 +1,7 @@
 package com.xinhe.nexus.management.service;
 
 import com.xinhe.nexus.management.auth.ManagementUser;
+import com.xinhe.nexus.management.auth.UserPhone;
 import com.xinhe.nexus.management.auth.PasswordPolicy;
 import com.xinhe.nexus.management.service.ManagementDtos.CompanyCreate;
 import com.xinhe.nexus.management.service.ManagementDtos.CompanyUpdate;
@@ -364,7 +365,8 @@ public class ManagementSystemService {
         requireManager(actor, "system:user:create");
         long companyId = resolveCompany(actor, body.companyId());
         String username = required(body.username(), "用户名");
-        String phone = required(body.phone(), "手机号");
+        String phone = UserPhone.validate(jdbcTemplate, required(body.phone(), "手机号"), null);
+        if (UserPhone.isMobile(username)) throw badRequest("用户名不能使用手机号格式");
         long userId = insertAndReturnId("""
                 INSERT INTO sys_user
                     (username, password_hash, display_name, user_type, phone, email,
@@ -396,18 +398,58 @@ public class ManagementSystemService {
         if (!targetWillAdmin && userPositionId(companyId, id) == null) {
             throw badRequest("普通用户必须先分配岗位");
         }
+        String phone = UserPhone.validate(jdbcTemplate, body.phone(), id);
         int changed = jdbcTemplate.update("""
                 UPDATE sys_user
                 SET display_name = ?, phone = ?, email = ?, status = ?,
                     auth_version = auth_version + 1, version = version + 1, updated_by = ?
                 WHERE id = ? AND version = ? AND user_type = 'COMPANY_USER' AND deleted_at IS NULL
-                """, required(body.displayName(), "用户姓名"), trim(body.phone()), trim(body.email()),
+                """, required(body.displayName(), "用户姓名"), phone, trim(body.email()),
                 targetStatus, actor.id(), id, body.version() == null ? -1 : body.version());
         requireUpdated(changed);
+        jdbcTemplate.update("""
+                UPDATE hr_employee_profile SET candidate_name=?,phone=?,email=?,updated_at=NOW()
+                WHERE user_id=? AND deleted_at IS NULL
+                """, required(body.displayName(), "用户姓名"), phone, trim(body.email()), id);
         jdbcTemplate.update("UPDATE sys_user_company SET is_company_admin = ?, updated_by = ? WHERE user_id = ? AND company_id = ? AND deleted_at IS NULL",
                 targetWillAdmin ? 1 : 0, actor.id(), id, companyId);
         incrementCompanyAuthVersion(companyId);
         audit(actor, companyId, "USER", "UPDATE", id);
+    }
+
+    @Transactional
+    public void deleteEmployeeProfile(ManagementUser actor, long profileId) {
+        if (actor.companyId() == null || !actor.roles().contains("COMPANY_ADMIN")) {
+            throw new ManagementException(HttpStatus.FORBIDDEN, "仅公司管理员可以删除人员档案");
+        }
+        long companyId = actor.companyId();
+        var profiles = jdbcTemplate.queryForList("""
+                SELECT user_id FROM hr_employee_profile
+                WHERE company_id = ? AND id = ? AND deleted_at IS NULL FOR UPDATE
+                """, companyId, profileId);
+        if (profiles.isEmpty()) throw notFound("人员档案不存在");
+
+        var linkedAccounts = jdbcTemplate.queryForList("""
+                SELECT u.id FROM sys_user u
+                JOIN sys_user_company uc ON uc.user_id = u.id AND uc.company_id = ?
+                WHERE u.id = ? AND u.deleted_at IS NULL AND uc.deleted_at IS NULL
+                FOR UPDATE
+                """, Long.class, companyId, profiles.get(0).get("user_id"));
+        if (!linkedAccounts.isEmpty()) {
+            deleteUser(actor, linkedAccounts.get(0), companyId);
+        }
+
+        jdbcTemplate.update("""
+                UPDATE hr_employee_profile SET deleted_at = NOW()
+                WHERE company_id = ? AND id = ?
+                """, companyId, profileId);
+        jdbcTemplate.update("""
+                UPDATE hr_employee_profile_change_request
+                SET status = 'CANCELLED', review_comment = '人员档案已删除',
+                    reviewed_by = ?, reviewed_at = NOW(), updated_at = NOW()
+                WHERE company_id = ? AND profile_id = ? AND status = 'PENDING'
+                """, actor.id(), companyId, profileId);
+        audit(actor, companyId, "HR_PROFILE", "DELETE", profileId);
     }
 
     /**
@@ -425,7 +467,8 @@ public class ManagementSystemService {
                 SELECT u.user_type AS userType, uc.is_company_admin AS companyAdmin
                 FROM sys_user u JOIN sys_user_company uc ON uc.user_id = u.id
                 WHERE u.id = ? AND uc.company_id = ? AND u.deleted_at IS NULL
-                  AND uc.status = 'ENABLED' AND uc.deleted_at IS NULL
+                  AND uc.deleted_at IS NULL
+                FOR UPDATE
                 """, userId, companyId);
         if (targets.isEmpty()) {
             throw notFound("当前公司中不存在该有效用户");
@@ -434,14 +477,15 @@ public class ManagementSystemService {
         if (!"COMPANY_USER".equals(target.get("userType"))) {
             throw badRequest("不能删除平台管理员账号");
         }
-        if (Boolean.TRUE.equals(target.get("companyAdmin")) || ((Number) target.get("companyAdmin")).intValue() == 1) {
+        if (Boolean.TRUE.equals(target.get("companyAdmin"))
+                || (target.get("companyAdmin") instanceof Number flag && flag.intValue() == 1)) {
             requireAnotherCompanyAdmin(companyId, userId);
         }
 
         jdbcTemplate.update("""
                 UPDATE sys_user_company
                 SET status = 'DISABLED', left_at = COALESCE(left_at, NOW()), deleted_at = NOW(), updated_by = ?
-                WHERE user_id = ? AND company_id = ? AND status = 'ENABLED' AND deleted_at IS NULL
+                WHERE user_id = ? AND company_id = ? AND deleted_at IS NULL
                 """, actor.id(), userId, companyId);
         jdbcTemplate.update("""
                 UPDATE sys_user_position

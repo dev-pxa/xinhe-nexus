@@ -1,6 +1,7 @@
 package com.xinhe.nexus.management.service;
 
 import com.xinhe.nexus.management.auth.ManagementUser;
+import com.xinhe.nexus.management.auth.UserPhone;
 import java.security.MessageDigest;
 import java.sql.Statement;
 import java.time.LocalDate;
@@ -33,14 +34,17 @@ public class PersonalProfileService {
     }
 
     public Map<String, Object> myProfile(ManagementUser user) {
-        List<Map<String, Object>> rows = db.queryForList(profileSql() + " WHERE ep.user_id=? AND ep.company_id=?", user.id(), user.companyId());
+        List<Map<String, Object>> rows = db.queryForList(profileSql() + " WHERE ep.user_id=? AND ep.company_id=? AND ep.deleted_at IS NULL", user.id(), user.companyId());
         if (rows.isEmpty()) throw notFound("个人档案不存在");
         return withEducations(rows.get(0), true);
     }
 
     public Map<String, Object> profile(ManagementUser user, long profileId) {
         requireAdmin(user);
-        List<Map<String, Object>> rows = db.queryForList(profileSql() + " WHERE ep.id=? AND ep.company_id=?", profileId, user.companyId());
+        List<Map<String, Object>> rows = db.queryForList(profileSql() + """
+                 LEFT JOIN sys_user_company uc ON uc.user_id=ep.user_id AND uc.company_id=ep.company_id
+                 WHERE ep.id=? AND ep.company_id=? AND uc.deleted_at IS NULL AND ep.deleted_at IS NULL
+                """, profileId, user.companyId());
         if (rows.isEmpty()) throw notFound("人员档案不存在");
         return withEducations(rows.get(0), false);
     }
@@ -51,8 +55,8 @@ public class PersonalProfileService {
         if (displayName == null || displayName.isBlank()) throw bad("姓名不能为空");
         validateEmail(email);
         String name = trim(displayName);
-        String normalizedPhone = trim(phone);
-        db.update("UPDATE hr_employee_profile SET candidate_name=?,phone=?,email=?,updated_at=NOW() WHERE id=? AND company_id=?", name, normalizedPhone, trim(email), profileId, actor.companyId());
+        String normalizedPhone = UserPhone.validate(db, phone, ((Number) current.get("userId")).longValue());
+        db.update("UPDATE hr_employee_profile SET candidate_name=?,phone=?,email=?,updated_at=NOW() WHERE user_id=? AND deleted_at IS NULL", name, normalizedPhone, trim(email), current.get("userId"));
         db.update("UPDATE sys_user SET display_name=?,phone=?,email=?,version=version+1,updated_by=?,updated_at=NOW() WHERE id=? AND deleted_at IS NULL", name, normalizedPhone, trim(email), actor.id(), current.get("userId"));
         Map<String, Object> updated = ownProfile(actor, profileId);
         log(actor, "UPDATE", profileId, current, updated);
@@ -102,6 +106,7 @@ public class PersonalProfileService {
         List<Map<String, Object>> rows = db.queryForList("SELECT * FROM hr_employee_profile_change_request WHERE company_id=? AND id=? AND approver_user_id=? AND status='PENDING' FOR UPDATE", actor.companyId(), id, actor.id());
         if (rows.isEmpty()) throw bad("申请不存在、已处理或无审批权限");
         Map<String, Object> request = rows.get(0);
+        if (((Number)request.get("applicant_user_id")).longValue()==actor.id()) throw forbidden();
         if (!approve && (comment == null || comment.isBlank())) throw bad("请填写驳回理由");
         if (approve) {
             Map<String, Object> changes = readJson((String) request.get("after_data"));
@@ -143,9 +148,11 @@ public class PersonalProfileService {
             String finalName = name == null ? (String) current.get("candidateName") : name;
             String finalPhone = changes.containsKey("phone") ? phone : (String) current.get("phone");
             String finalEmail = changes.containsKey("email") ? email : (String) current.get("email");
+            finalPhone = UserPhone.validate(db, finalPhone, userId);
             validateEmail(finalEmail);
             db.update("UPDATE hr_employee_profile SET candidate_name=?,phone=?,email=?,updated_at=NOW() WHERE id=?", finalName, finalPhone, finalEmail, profileId);
             db.update("UPDATE sys_user SET display_name=?,phone=?,email=?,version=version+1,updated_by=?,updated_at=NOW() WHERE id=? AND deleted_at IS NULL", finalName, finalPhone, finalEmail, operatorId, userId);
+            db.update("UPDATE hr_employee_profile SET candidate_name=?,phone=?,email=?,updated_at=NOW() WHERE user_id=? AND deleted_at IS NULL", finalName, finalPhone, finalEmail, userId);
         }
     }
 
@@ -192,7 +199,7 @@ public class PersonalProfileService {
     }
 
     private long findApprover(long companyId, long applicantId) {
-        List<Long> admins = db.query("SELECT uc.user_id FROM sys_user_company uc JOIN sys_user u ON u.id=uc.user_id WHERE uc.company_id=? AND uc.is_company_admin=1 AND uc.status='ENABLED' AND u.status='ENABLED' AND u.id<>? ORDER BY uc.user_id LIMIT 1", (rs, n) -> rs.getLong(1), companyId, applicantId);
+        List<Long> admins = db.query("SELECT uc.user_id FROM sys_user_company uc JOIN sys_user u ON u.id=uc.user_id WHERE uc.company_id=? AND uc.is_company_admin=1 AND uc.status='ENABLED' AND uc.deleted_at IS NULL AND u.status='ENABLED' AND u.deleted_at IS NULL AND u.id<>? ORDER BY uc.user_id LIMIT 1", (rs, n) -> rs.getLong(1), companyId, applicantId);
         if (!admins.isEmpty()) return admins.get(0);
         List<Long> reviewers = db.query("SELECT DISTINCT uc.user_id FROM sys_user_company uc JOIN sys_user reviewer ON reviewer.id=uc.user_id AND reviewer.status='ENABLED' AND reviewer.deleted_at IS NULL WHERE uc.company_id=? AND uc.user_id<>? AND uc.status='ENABLED' AND uc.deleted_at IS NULL AND (uc.is_company_admin=1 OR EXISTS(SELECT 1 FROM sys_user_position up JOIN sys_position_permission pp ON pp.position_id=up.position_id AND pp.company_id=up.company_id JOIN sys_permission p ON p.id=pp.permission_id WHERE up.company_id=uc.company_id AND up.user_id=uc.user_id AND up.status='ENABLED' AND up.deleted_at IS NULL AND p.permission_code='hr:profile:approve') OR EXISTS(SELECT 1 FROM sys_user_permission uperm JOIN sys_permission p ON p.id=uperm.permission_id WHERE uperm.company_id=uc.company_id AND uperm.user_id=uc.user_id AND p.permission_code='hr:profile:approve' AND p.status='ENABLED' AND p.deleted_at IS NULL)) ORDER BY uc.user_id LIMIT 1", (rs, n) -> rs.getLong(1), companyId, applicantId);
         if (reviewers.isEmpty()) throw bad("未配置人员档案审批人，请联系公司管理员");
@@ -205,17 +212,20 @@ public class PersonalProfileService {
     private ManagementException forbidden() { return new ManagementException(HttpStatus.FORBIDDEN, "没有人员档案操作权限"); }
     private ManagementException notFound(String message) { return new ManagementException(HttpStatus.NOT_FOUND, message); }
     private ManagementException bad(String message) { return new ManagementException(HttpStatus.BAD_REQUEST, message); }
-    private String profileSql() { return "SELECT ep.id,ep.user_id userId,ep.candidate_name candidateName,ep.gender,ep.birth_date birthDate,ep.id_type idType,ep.id_number_ciphertext idNumberCiphertext,ep.phone,ep.email,ep.address_ciphertext address,ep.emergency_contact_name emergencyContactName,ep.emergency_contact_relation emergencyContactRelation,ep.emergency_contact_phone emergencyContactPhone,ep.status,ep.submitted_at submittedAt,u.username,o.org_name departmentName,p.position_name positionName FROM hr_employee_profile ep JOIN sys_user u ON u.id=ep.user_id JOIN hr_onboarding_invitation i ON i.id=ep.invitation_id JOIN sys_org_unit o ON o.id=i.department_id JOIN sys_position p ON p.id=i.position_id"; }
+    private String profileSql() { return "SELECT ep.id,ep.user_id userId,ep.candidate_name candidateName,ep.gender,ep.birth_date birthDate,ep.id_type idType,ep.id_number_ciphertext idNumberCiphertext,ep.phone,ep.email,ep.address_ciphertext address,ep.emergency_contact_name emergencyContactName,ep.emergency_contact_relation emergencyContactRelation,ep.emergency_contact_phone emergencyContactPhone,ep.status,ep.submitted_at submittedAt,u.username,o.org_name departmentName,p.position_name positionName FROM hr_employee_profile ep LEFT JOIN sys_user u ON u.id=ep.user_id JOIN hr_onboarding_invitation i ON i.id=ep.invitation_id JOIN sys_org_unit o ON o.id=i.department_id JOIN sys_position p ON p.id=i.position_id"; }
     private Map<String, Object> withEducations(Map<String, Object> row) { return withEducations(row, false); }
     private Map<String, Object> withEducations(Map<String, Object> row, boolean revealIdNumber) { Map<String, Object> result = new LinkedHashMap<>(row); String idNumber = profileDataCrypto.decrypt((String) result.get("idNumberCiphertext")); result.put("idNumber", revealIdNumber ? idNumber : profileDataCrypto.mask(idNumber)); result.remove("idNumberCiphertext"); result.put("educations", db.queryForList("SELECT start_month startMonth,end_month endMonth,education_level educationLevel,school_name schoolName FROM hr_employee_education WHERE profile_id=? ORDER BY start_month DESC,end_month DESC,id DESC", row.get("id"))); return result; }
     private Map<String, Object> ownProfile(ManagementUser user, long profileId) {
-        List<Map<String, Object>> rows = db.queryForList(profileSql() + " WHERE ep.id=? AND ep.user_id=? AND ep.company_id=?", profileId, user.id(), user.companyId());
+        List<Map<String, Object>> rows = db.queryForList(profileSql() + " WHERE ep.id=? AND ep.user_id=? AND ep.company_id=? AND ep.deleted_at IS NULL", profileId, user.id(), user.companyId());
         if (rows.isEmpty()) throw notFound("个人档案不存在");
         return withEducations(rows.get(0), false);
     }
     private long profileId(ManagementUser user) { return ((Number) myProfileRow(user).get("id")).longValue(); }
     private Map<String, Object> myProfileRow(ManagementUser user) {
-        List<Map<String, Object>> rows = db.queryForList(profileSql() + " WHERE ep.user_id=? AND ep.company_id=?", user.id(), user.companyId());
+        List<Map<String, Object>> rows = db.queryForList("""
+                SELECT id FROM hr_employee_profile
+                WHERE user_id=? AND company_id=? AND deleted_at IS NULL FOR UPDATE
+                """, user.id(), user.companyId());
         if (rows.isEmpty()) throw notFound("个人档案不存在");
         return rows.get(0);
     }

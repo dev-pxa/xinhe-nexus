@@ -123,7 +123,7 @@ public class ErpService {
         require(actor, "erp:sales-order:view");
         if (pendingOnly) {
             require(actor, "erp:sales-order:approve");
-            return db.queryForList("SELECT o.id,o.application_no applicationNo,o.order_no orderNo,o.customer_name customerName,o.status,o.total_amount totalAmount,o.created_at createdAt,u.display_name creatorName FROM erp_sales_order o JOIN sys_user u ON u.id=o.created_by WHERE o.company_id=? AND o.approver_user_id=? AND o.status='PENDING_APPROVAL' ORDER BY o.created_at", actor.companyId(), actor.id());
+            return db.queryForList("SELECT o.id,o.application_no applicationNo,o.order_no orderNo,o.customer_name customerName,o.status,o.total_amount totalAmount,o.created_at createdAt,u.display_name creatorName FROM erp_sales_order o JOIN sys_user u ON u.id=o.created_by WHERE o.company_id=? AND o.approver_user_id=? AND o.created_by<>? AND o.status='PENDING_APPROVAL' ORDER BY o.created_at", actor.companyId(), actor.id(), actor.id());
         }
         return db.queryForList("SELECT o.id,o.application_no applicationNo,o.order_no orderNo,o.customer_name customerName,o.status,o.total_amount totalAmount,o.created_at createdAt,o.approval_comment approvalComment,u.display_name creatorName FROM erp_sales_order o JOIN sys_user u ON u.id=o.created_by WHERE o.company_id=? AND (o.created_by=? OR o.approver_user_id=?) ORDER BY o.created_at DESC", actor.companyId(), actor.id(), actor.id());
     }
@@ -202,7 +202,10 @@ public class ErpService {
     @Transactional
     public Map<String, Object> decideOrder(ManagementUser actor, long id, boolean approve, String opinion) {
         require(actor, "erp:sales-order:approve");
-        Map<String, Object> order = db.queryForMap("SELECT id,status,approver_user_id approverUserId FROM erp_sales_order WHERE id=? AND company_id=? FOR UPDATE", id, actor.companyId());
+        Map<String, Object> order = db.queryForMap("SELECT id,status,created_by creatorUserId,approver_user_id approverUserId FROM erp_sales_order WHERE id=? AND company_id=? FOR UPDATE", id, actor.companyId());
+        if (order.get("creatorUserId") instanceof Number creator && creator.longValue() == actor.id()) {
+            throw new ManagementException(HttpStatus.FORBIDDEN, "申请人不能审批自己的订单");
+        }
         if (!"PENDING_APPROVAL".equals(order.get("status")) || ((Number) order.get("approverUserId")).longValue() != actor.id()) throw new ManagementException(HttpStatus.FORBIDDEN, "订单不在你的待审核列表中");
         db.update("UPDATE erp_sales_order SET status=?,approval_comment=?,approved_at=IF(?,NOW(),NULL),updated_by=?,version=version+1 WHERE id=?", approve ? "OPEN" : "REJECTED", blank(opinion), approve, actor.id(), id);
         db.update("UPDATE erp_sales_order_approval SET decision=?,opinion=?,decided_at=NOW() WHERE company_id=? AND order_id=? AND approver_user_id=? AND decision='PENDING'", approve ? "APPROVED" : "REJECTED", blank(opinion), actor.companyId(), id, actor.id());
@@ -214,23 +217,9 @@ public class ErpService {
     }
 
     private long departmentApprover(ManagementUser actor) {
-        // V2 移除了岗位关联表的 is_primary 字段；按关联记录顺序遍历用户岗位，并逐级向上寻找负责人。
-        List<Long> orgs = db.query("SELECT p.org_unit_id FROM sys_user_position up JOIN sys_position p ON p.id=up.position_id AND p.status='ENABLED' AND p.deleted_at IS NULL WHERE up.company_id=? AND up.user_id=? AND up.status='ENABLED' AND up.deleted_at IS NULL ORDER BY up.id", (rs, n) -> rs.getLong(1), actor.companyId(), actor.id());
-        for (Long orgId : orgs) {
-            List<Map<String, Object>> ancestors = db.queryForList("SELECT id,org_path,manager_user_id,manager_position_id,org_level FROM sys_org_unit WHERE company_id=? AND deleted_at IS NULL AND status='ENABLED' AND ? LIKE CONCAT(org_path,'%') ORDER BY org_level DESC", actor.companyId(), db.queryForObject("SELECT org_path FROM sys_org_unit WHERE id=?", String.class, orgId));
-            for (Map<String, Object> org : ancestors) {
-                Long manager = org.get("manager_user_id") == null ? null : ((Number) org.get("manager_user_id")).longValue();
-                if (manager == null && org.get("manager_position_id") != null) {
-                    List<Long> people = db.query("SELECT up.user_id FROM sys_user_position up JOIN sys_user u ON u.id=up.user_id AND u.status='ENABLED' AND u.deleted_at IS NULL WHERE up.company_id=? AND up.position_id=? AND up.status='ENABLED' AND up.deleted_at IS NULL ORDER BY up.id LIMIT 1", (rs, n) -> rs.getLong(1), actor.companyId(), ((Number) org.get("manager_position_id")).longValue());
-                    if (!people.isEmpty()) manager = people.get(0);
-                }
-                if (manager != null && manager != actor.id()) {
-                    Integer active = db.queryForObject("SELECT COUNT(*) FROM sys_user_company uc JOIN sys_user u ON u.id=uc.user_id WHERE uc.company_id=? AND uc.user_id=? AND uc.status='ENABLED' AND u.status='ENABLED' AND u.deleted_at IS NULL", Integer.class, actor.companyId(), manager);
-                    if (active != null && active > 0) return manager;
-                }
-            }
-        }
-        throw bad("未找到可审批的部门负责人，请联系管理员配置部门负责人岗位");
+        var manager = OrganizationApprovers.nearest(db, actor.companyId(), actor.id(), "erp:sales-order:approve");
+        if (manager == null) throw bad("本部门及上级组织未找到有效且有订单审批权限的负责人，请联系管理员配置");
+        return ((Number)manager.get("id")).longValue();
     }
 
     private void appendLike(StringBuilder sql, List<Object> params, String column, String value) {

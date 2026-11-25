@@ -52,12 +52,12 @@ class AttendanceServiceAuthorizationTest {
 
     @Test
     void settlementStatusUsesHolidayPriorityAndPunchCountBoundaries() {
-        org.junit.jupiter.api.Assertions.assertEquals("COMPANY_HOLIDAY", AttendanceService.resolveStatus(true, true, 2));
-        org.junit.jupiter.api.Assertions.assertEquals("PERSONAL_HOLIDAY", AttendanceService.resolveStatus(false, true, 0));
-        org.junit.jupiter.api.Assertions.assertEquals("ABSENT", AttendanceService.resolveStatus(false, false, 0));
-        org.junit.jupiter.api.Assertions.assertEquals("SINGLE", AttendanceService.resolveStatus(false, false, 1));
-        org.junit.jupiter.api.Assertions.assertEquals("NORMAL", AttendanceService.resolveStatus(false, false, 2));
-        org.junit.jupiter.api.Assertions.assertEquals("NORMAL", AttendanceService.resolveStatus(false, false, 9));
+        org.junit.jupiter.api.Assertions.assertEquals("COMPANY_HOLIDAY", AttendanceService.resolveStatus(true, true, 2, null));
+        org.junit.jupiter.api.Assertions.assertEquals("PERSONAL_HOLIDAY", AttendanceService.resolveStatus(false, true, 0, null));
+        org.junit.jupiter.api.Assertions.assertEquals("ABSENT", AttendanceService.resolveStatus(false, false, 0, null));
+        org.junit.jupiter.api.Assertions.assertEquals("SINGLE", AttendanceService.resolveStatus(false, false, 1, null));
+        org.junit.jupiter.api.Assertions.assertEquals("NORMAL", AttendanceService.resolveStatus(false, false, 2, null));
+        org.junit.jupiter.api.Assertions.assertEquals("NORMAL", AttendanceService.resolveStatus(false, false, 9, null));
     }
 
     @Test

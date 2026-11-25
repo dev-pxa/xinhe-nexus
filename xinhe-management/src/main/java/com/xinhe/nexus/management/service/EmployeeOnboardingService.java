@@ -1,6 +1,7 @@
 package com.xinhe.nexus.management.service;
 
 import com.xinhe.nexus.management.auth.ManagementUser;
+import com.xinhe.nexus.management.auth.UserPhone;
 import com.xinhe.nexus.management.auth.PasswordPolicy;
 import com.xinhe.nexus.management.service.ManagementDtos.EducationInput;
 import com.xinhe.nexus.management.service.ManagementDtos.OnboardingInvitationCreate;
@@ -79,7 +80,9 @@ public class EmployeeOnboardingService {
                 JOIN sys_org_unit o ON o.id=i.department_id
                 JOIN sys_position p ON p.id=i.position_id
                 LEFT JOIN hr_employee_profile ep ON ep.invitation_id=i.id
+                LEFT JOIN sys_user_company uc ON uc.user_id=ep.user_id AND uc.company_id=ep.company_id
                 WHERE i.company_id=? AND (? IS NULL OR i.status=?)
+                  AND uc.deleted_at IS NULL AND ep.deleted_at IS NULL
                 ORDER BY i.created_at DESC
                 """, actor.companyId(), status, status);
     }
@@ -118,7 +121,7 @@ public class EmployeeOnboardingService {
 
     public Map<String, Object> publicForm(String token) {
         if (token == null || token.isBlank()) throw notFound("表单不存在或已失效");
-        List<Map<String, Object>> rows = db.queryForList("SELECT i.id,i.candidate_name AS candidateName,i.status,i.expires_at AS expiresAt,c.company_name AS companyName,o.org_name AS departmentName,p.position_name AS positionName FROM hr_onboarding_invitation i JOIN sys_company c ON c.id=i.company_id JOIN sys_org_unit o ON o.id=i.department_id JOIN sys_position p ON p.id=i.position_id WHERE i.token_hash=?", hash(token));
+        List<Map<String, Object>> rows = db.queryForList("SELECT i.id,i.candidate_name AS candidateName,i.status,i.expires_at AS expiresAt,c.company_name AS companyName,o.org_name AS departmentName,p.position_name AS positionName FROM hr_onboarding_invitation i JOIN sys_company c ON c.id=i.company_id JOIN sys_org_unit o ON o.id=i.department_id JOIN sys_position p ON p.id=i.position_id WHERE i.token_hash=? AND NOT EXISTS (SELECT 1 FROM hr_employee_profile ep WHERE ep.invitation_id=i.id AND ep.deleted_at IS NOT NULL)", hash(token));
         if (rows.isEmpty()) throw notFound("表单不存在或已失效");
         Map<String, Object> row = rows.get(0);
         if ("PENDING".equals(row.get("status")) && !asLocalDateTime(row.get("expiresAt")).isAfter(now())) {
@@ -141,13 +144,14 @@ public class EmployeeOnboardingService {
         String username = required(input.username(), "用户名");
         if (!username.matches("^[A-Za-z][A-Za-z0-9_.-]{2,63}$")) throw bad("用户名须以字母开头，长度为3-64位");
         if (count("SELECT COUNT(*) FROM sys_user WHERE username=? AND deleted_at IS NULL", username) > 0) throw conflict("用户名已存在，请更换");
+        String phone = UserPhone.validate(db, input.phone(), null);
         long companyId = ((Number) row.get("companyId")).longValue();
         String name = (String) row.get("candidateName");
-        long userId = insert("INSERT INTO sys_user(username,password_hash,display_name,user_type,status,must_change_password,phone,email) VALUES(?,?,?,'COMPANY_USER','ENABLED',0,?,?)", username, passwordEncoder.encode(input.password()), name, trim(input.phone()), trim(input.email()));
+        long userId = insert("INSERT INTO sys_user(username,password_hash,display_name,user_type,status,must_change_password,phone,email) VALUES(?,?,?,'COMPANY_USER','ENABLED',0,?,?)", username, passwordEncoder.encode(input.password()), name, phone, trim(input.email()));
         db.update("INSERT INTO sys_user_company(user_id,company_id,is_company_admin,status) VALUES(?,?,0,'ENABLED')", userId, companyId);
         long positionId = ((Number) row.get("positionId")).longValue();
         db.update("INSERT INTO sys_user_position(company_id,user_id,position_id,status) VALUES(?,?,?,'ENABLED')", companyId, userId, positionId);
-        long profileId = insert("INSERT INTO hr_employee_profile(invitation_id,user_id,company_id,candidate_name,gender,birth_date,id_type,id_number_ciphertext,id_number_hash,phone,email,address_ciphertext,emergency_contact_name,emergency_contact_relation,emergency_contact_phone,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'LOCKED')", invitationId, userId, companyId, name, trim(input.gender()), parseDate(input.birthDate()), trim(input.idType()), profileDataCrypto.encrypt(input.idNumber()), hashNullable(input.idNumber()), normalizePhone(input.phone()), trim(input.email()), trim(input.address()), trim(input.emergencyContactName()), trim(input.emergencyContactRelation()), normalizePhone(input.emergencyContactPhone()));
+        long profileId = insert("INSERT INTO hr_employee_profile(invitation_id,user_id,company_id,candidate_name,gender,birth_date,id_type,id_number_ciphertext,id_number_hash,phone,email,address_ciphertext,emergency_contact_name,emergency_contact_relation,emergency_contact_phone,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'LOCKED')", invitationId, userId, companyId, name, trim(input.gender()), parseDate(input.birthDate()), trim(input.idType()), profileDataCrypto.encrypt(input.idNumber()), hashNullable(input.idNumber()), phone, trim(input.email()), trim(input.address()), trim(input.emergencyContactName()), trim(input.emergencyContactRelation()), normalizePhone(input.emergencyContactPhone()));
         List<EducationInput> educations = normalizedEducations(input.educations());
         int order = 0;
         for (EducationInput education : educations) {
@@ -160,7 +164,21 @@ public class EmployeeOnboardingService {
 
     public Map<String, Object> detail(ManagementUser actor, long id) {
         requireAdmin(actor);
-        List<Map<String, Object>> rows = db.queryForList("SELECT ep.id,ep.candidate_name AS candidateName,ep.gender,ep.birth_date AS birthDate,ep.id_type AS idType,ep.id_number_ciphertext AS idNumberCiphertext,ep.phone,ep.email,ep.address_ciphertext AS address,ep.emergency_contact_name AS emergencyContactName,ep.emergency_contact_relation AS emergencyContactRelation,ep.emergency_contact_phone AS emergencyContactPhone,ep.status,ep.submitted_at AS submittedAt,u.username,o.org_name AS departmentName,p.position_name AS positionName FROM hr_employee_profile ep JOIN sys_user u ON u.id=ep.user_id JOIN hr_onboarding_invitation i ON i.id=ep.invitation_id JOIN sys_org_unit o ON o.id=i.department_id JOIN sys_position p ON p.id=i.position_id WHERE ep.company_id=? AND ep.id=?", actor.companyId(), id);
+        List<Map<String, Object>> rows = db.queryForList("""
+                SELECT ep.id,ep.candidate_name AS candidateName,ep.gender,ep.birth_date AS birthDate,
+                       ep.id_type AS idType,ep.id_number_ciphertext AS idNumberCiphertext,ep.phone,ep.email,
+                       ep.address_ciphertext AS address,ep.emergency_contact_name AS emergencyContactName,
+                       ep.emergency_contact_relation AS emergencyContactRelation,
+                       ep.emergency_contact_phone AS emergencyContactPhone,ep.status,ep.submitted_at AS submittedAt,
+                       u.username,o.org_name AS departmentName,p.position_name AS positionName
+                FROM hr_employee_profile ep
+                LEFT JOIN sys_user u ON u.id=ep.user_id
+                JOIN hr_onboarding_invitation i ON i.id=ep.invitation_id
+                JOIN sys_org_unit o ON o.id=i.department_id
+                JOIN sys_position p ON p.id=i.position_id
+                LEFT JOIN sys_user_company uc ON uc.user_id=ep.user_id AND uc.company_id=ep.company_id
+                WHERE ep.company_id=? AND ep.id=? AND uc.deleted_at IS NULL AND ep.deleted_at IS NULL
+                """, actor.companyId(), id);
         if (rows.isEmpty()) throw new ManagementException(HttpStatus.NOT_FOUND, "人员档案不存在");
         Map<String, Object> result = new LinkedHashMap<>(rows.get(0));
         result.put("idNumber", profileDataCrypto.mask(profileDataCrypto.decrypt((String) result.get("idNumberCiphertext"))));

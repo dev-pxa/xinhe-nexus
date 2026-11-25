@@ -4,6 +4,7 @@ import com.xinhe.nexus.common.api.ApiResponse;
 import com.xinhe.nexus.management.auth.AuthConstants;
 import com.xinhe.nexus.management.auth.ManagementUser;
 import com.xinhe.nexus.management.service.PersonalProfileService;
+import com.xinhe.nexus.management.service.ManagementSystemService;
 import java.util.List;
 import java.util.Map;
 import org.springframework.web.bind.annotation.*;
@@ -12,7 +13,17 @@ import org.springframework.web.bind.annotation.*;
 @RequestMapping("/api/hr/profiles")
 public class PersonalProfileController {
     private final PersonalProfileService service;
-    public PersonalProfileController(PersonalProfileService service) { this.service = service; }
+    private final ManagementSystemService management;
+    public PersonalProfileController(PersonalProfileService service, ManagementSystemService management) {
+        this.service = service;
+        this.management = management;
+    }
+
+    @DeleteMapping("/{id}")
+    public ApiResponse<Void> delete(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user, @PathVariable long id) {
+        management.deleteEmployeeProfile(user, id);
+        return ApiResponse.success(null);
+    }
 
     @GetMapping("/me")
     public ApiResponse<Map<String,Object>> me(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser user) { return ApiResponse.success(service.myProfile(user)); }

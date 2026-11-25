@@ -5,6 +5,7 @@ import java.sql.SQLException;
 import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.beans.factory.annotation.Value;
 
 @Repository
@@ -26,6 +27,15 @@ public class UserAccountRepository {
                 FROM sys_user WHERE username = ? AND deleted_at IS NULL
                 """, this::mapAccount, username);
         return users.isEmpty() ? null : users.get(0);
+    }
+
+    public UserAccount findByPhone(String phone) {
+        List<UserAccount> users = jdbcTemplate.query("""
+                SELECT id, username, password_hash, display_name, user_type, status,
+                       must_change_password, login_failed_count, locked_until, auth_version
+                FROM sys_user WHERE phone=? AND deleted_at IS NULL LIMIT 2
+                """, this::mapAccount, phone);
+        return users.size() == 1 ? users.get(0) : null;
     }
 
     public UserAccount findById(long id) {
@@ -127,7 +137,9 @@ public class UserAccountRepository {
         return profiles.isEmpty() ? null : profiles.get(0);
     }
 
+    @Transactional
     public void updateProfile(long id, String displayName, String phone, String email) {
+        phone = UserPhone.validate(jdbcTemplate, phone, id);
         jdbcTemplate.update(
                 """
                 UPDATE sys_user
@@ -140,7 +152,7 @@ public class UserAccountRepository {
                 """
                 UPDATE hr_employee_profile
                 SET candidate_name = ?, phone = ?, email = ?, updated_at = NOW()
-                WHERE user_id = ?
+                WHERE user_id = ? AND deleted_at IS NULL
                 """, displayName, phone, email, id);
     }
 

@@ -37,21 +37,23 @@ public class ManagementAuthService {
 
     public LoginResult authenticate(LoginRequest request, HttpServletRequest servletRequest, HttpServletResponse response) {
         if (request == null || request.username() == null || request.password() == null) {
-            return new LoginResult(null, "请输入用户名和密码");
+            return new LoginResult(null, "请输入用户名或手机号和密码");
         }
         String username = request.username().trim();
-        if (username.isBlank()) return new LoginResult(null, "请输入用户名");
+        if (username.isBlank()) return new LoginResult(null, "请输入用户名或手机号");
         if (request.password().isBlank()) return new LoginResult(null, "请输入密码");
-        UserAccount account = userAccountRepository.findByUsername(username);
+        UserAccount account = UserPhone.isMobile(username)
+                ? userAccountRepository.findByPhone(username)
+                : userAccountRepository.findByUsername(username);
         if (account == null) {
-            return new LoginResult(null, "用户名或密码错误");
+            return new LoginResult(null, "账号或密码错误");
         }
         if (!"ENABLED".equals(account.status())) {
-            return new LoginResult(null, "用户名或密码错误");
+            return new LoginResult(null, "账号或密码错误");
         }
         if (!passwordEncoder.matches(request.password(), account.passwordHash())) {
             userAccountRepository.recordLoginFailure(account.id());
-            return new LoginResult(null, "用户名或密码错误");
+            return new LoginResult(null, "账号或密码错误");
         }
         ManagementUser user = userAccountRepository.toManagementUser(account);
         if (user == null) {

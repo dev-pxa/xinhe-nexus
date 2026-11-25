@@ -29,6 +29,18 @@ class ErpServiceAuthorizationTest {
     }
 
     @Test
+    void applicantCannotApproveOwnLegacyOrder() {
+        JdbcTemplate db = mock(JdbcTemplate.class);
+        when(db.queryForMap(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(Object[].class)))
+                .thenReturn(java.util.Map.of("status","PENDING_APPROVAL","creatorUserId",10L,"approverUserId",10L));
+        ErpService service = new ErpService(db);
+        ManagementUser applicant = new ManagementUser(10L,8L,"公司","user","申请人",
+                List.of("COMPANY_ADMIN"),List.of("*"),false,1L);
+        org.junit.jupiter.api.Assertions.assertThrows(ManagementException.class,
+                () -> service.decideOrder(applicant,88L,true,""));
+    }
+
+    @Test
     void subsidiaryCompanyCanUseErpProductApiWithPermission() {
         ManagementUser subsidiary = user(false, List.of("erp:product:view"));
         when(db.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());

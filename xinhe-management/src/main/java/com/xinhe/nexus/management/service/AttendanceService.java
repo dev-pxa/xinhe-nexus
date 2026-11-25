@@ -29,7 +29,7 @@ public class AttendanceService {
         validateLocation(input, true);
         LocalDateTime now = LocalDateTime.now(SYSTEM_ZONE).withNano(0);
         LocalDate date = now.toLocalDate();
-        return appendPunch(user.companyId(), user.id(), null, date, now, "NORMAL", "WEB", ip, userAgent, input, null);
+        return appendPunch(user.companyId(), user.id(), null, date, now, punchType(input == null ? null : input.punchType()), "WEB", ip, userAgent, input, null);
     }
 
     public List<Map<String, Object>> listMine(ManagementUser user, LocalDate from, LocalDate to) {
@@ -90,8 +90,8 @@ public class AttendanceService {
         }
         LocalDateTime parsedTime = parsePunchTime(punchTime);
         validateLocation(input, false);
-        PunchInput punchInput = input == null ? new PunchInput(null,null,null,"ADMIN_ENTRY",null,null) : new PunchInput(input.latitude(), input.longitude(), input.accuracy(), input.locationSource(), input.capturedAt(), input.remark());
-        return appendPunch(targetCompany, userId, operator.id(), parsedTime.toLocalDate(), parsedTime, "NORMAL", "ADMIN", ip, userAgent, punchInput, null);
+        PunchInput punchInput = input == null ? new PunchInput(null,null,null,"ADMIN_ENTRY",null,null) : new PunchInput(input.latitude(), input.longitude(), input.accuracy(), input.locationSource(), input.capturedAt(), input.remark(), input.punchType());
+        return appendPunch(targetCompany, userId, operator.id(), parsedTime.toLocalDate(), parsedTime, punchType(input == null ? null : input.punchType()), "ADMIN", ip, userAgent, punchInput, null);
     }
 
     private List<Map<String, Object>> listSummaries(
@@ -100,7 +100,7 @@ public class AttendanceService {
                 SELECT s.id, s.company_id AS companyId, s.user_id AS userId,
                        u.username, u.display_name AS displayName, MAX(o.org_name) AS orgName,
                        DATE_FORMAT(s.punch_date, '%Y-%m-%d') AS punchDate, s.first_punch_time AS firstPunchTime,
-                       s.last_punch_time AS lastPunchTime, s.punch_count AS punchCount, s.day_type AS dayType, s.status
+                       s.last_punch_time AS lastPunchTime, s.punch_count AS punchCount, s.day_type AS dayType, s.status, s.leave_type AS leaveType, s.is_late AS late, s.is_early AS early
                 FROM oa_attendance_day_summary s
                 JOIN sys_user u ON u.id = s.user_id AND u.deleted_at IS NULL
                 LEFT JOIN sys_user_company uc ON uc.user_id = s.user_id
@@ -135,7 +135,7 @@ public class AttendanceService {
             args.add(keyword);
         }
         sql.append(" GROUP BY s.id, s.company_id, s.user_id, u.username, u.display_name,");
-        sql.append(" s.punch_date, s.first_punch_time, s.last_punch_time, s.punch_count, s.day_type, s.status");
+        sql.append(" s.punch_date, s.first_punch_time, s.last_punch_time, s.punch_count, s.day_type, s.status, s.leave_type, s.is_late, s.is_early");
         sql.append(" ORDER BY s.punch_date DESC, u.display_name, s.user_id LIMIT ? OFFSET ?");
         args.add(limit); args.add(offset);
         return jdbcTemplate.queryForList(sql.toString(), args.toArray());
@@ -147,31 +147,79 @@ public class AttendanceService {
     }
 
     private Map<String,Object> recalculateDayInternal(long companyId,long userId,LocalDate date){
-        List<Map<String,Object>> rules=jdbcTemplate.queryForList("SELECT id,published_revision publishedRevision FROM oa_attendance_rule_year WHERE company_id=? AND rule_year=? AND published_revision IS NOT NULL",companyId,date.getYear());
-        Long ruleId=null;Integer revision=null;boolean companyHoliday=false;boolean personalHoliday=false;boolean ruleConfigured=false;
-        if(!rules.isEmpty()){Map<String,Object> rule=rules.get(0);ruleId=((Number)rule.get("id")).longValue();revision=((Number)rule.get("publishedRevision")).intValue();Integer configured=jdbcTemplate.queryForObject("SELECT COUNT(*) FROM oa_attendance_user_rule_config WHERE rule_year_id=? AND revision=? AND user_id=?",Integer.class,ruleId,revision,userId);ruleConfigured=configured!=null&&configured>0;if(ruleConfigured){Integer companyCount=jdbcTemplate.queryForObject("SELECT COUNT(*) FROM oa_attendance_company_holiday WHERE rule_year_id=? AND revision=? AND holiday_date=?",Integer.class,ruleId,revision,date);Integer personalCount=jdbcTemplate.queryForObject("SELECT COUNT(*) FROM oa_attendance_user_holiday WHERE rule_year_id=? AND revision=? AND user_id=? AND holiday_date=?",Integer.class,ruleId,revision,userId,date);companyHoliday=companyCount!=null&&companyCount>0;personalHoliday=personalCount!=null&&personalCount>0;}}
-        Map<String,Object> punches=jdbcTemplate.queryForMap("SELECT MIN(punch_time) firstPunchTime,MAX(punch_time) lastPunchTime,COUNT(*) punchCount FROM oa_attendance_punch WHERE company_id=? AND user_id=? AND punch_date=?",companyId,userId,date);int count=((Number)punches.get("punchCount")).intValue();String dayType=companyHoliday?"COMPANY_HOLIDAY":personalHoliday?"PERSONAL_HOLIDAY":"WORKDAY";String status=ruleConfigured?resolveStatus(companyHoliday,personalHoliday,count):"RULE_MISSING";
+        AttendanceCalendar calendar = AttendanceCalendar.load(jdbcTemplate, companyId, userId, date, date);
+        AttendanceCalendar.DayType dayType = calendar.dayType(date);
+        var punches = jdbcTemplate.queryForMap("""
+                SELECT MIN(punch_time) firstPunchTime, MAX(punch_time) lastPunchTime, COUNT(*) punchCount
+                FROM oa_attendance_punch WHERE company_id=? AND user_id=? AND punch_date=?
+                """, companyId, userId, date);
+        int count = ((Number) punches.get("punchCount")).intValue();
+        String leaveType = null;
+        if (calendar.configured() && dayType == AttendanceCalendar.DayType.WORKDAY) {
+            // Read the current approval after taking the membership lock, even in an older settlement transaction.
+            leaveType = jdbcTemplate.query("""
+                    SELECT r.leave_type FROM oa_attendance_leave_day d
+                    JOIN oa_attendance_leave_request r ON r.id=d.request_id AND r.status='APPROVED'
+                    WHERE d.company_id=? AND d.applicant_id=? AND d.leave_date=? AND d.reserved=1
+                    FOR SHARE
+                    """, rs -> rs.next() ? rs.getString(1) : null, companyId, userId, date);
+        }
+        String status = calendar.configured()
+                ? resolveStatus(dayType == AttendanceCalendar.DayType.COMPANY_HOLIDAY,
+                        dayType == AttendanceCalendar.DayType.PERSONAL_HOLIDAY, count, leaveType)
+                : "RULE_MISSING";
+        boolean late = false;
+        boolean early = false;
+        if (calendar.configured() && dayType == AttendanceCalendar.DayType.WORKDAY && leaveType == null) {
+            var rule = AttendanceTimeRules.load(jdbcTemplate, calendar.ruleId(), calendar.revision()).stream()
+                    .filter(r -> !date.isBefore(r.startDate()) && !date.isAfter(r.endDate())).findFirst();
+            if (rule.isPresent()) {
+                var dayPunches = jdbcTemplate.query("""
+                        SELECT punch_time,punch_type FROM oa_attendance_punch
+                        WHERE company_id=? AND user_id=? AND punch_date=? ORDER BY punch_time,id
+                        """, (rs, row) -> new AttendanceDayEvaluation.Punch(
+                        rs.getObject(1, LocalDateTime.class), rs.getString(2)), companyId, userId, date);
+                var result = AttendanceDayEvaluation.evaluate(date, LocalDate.now(SYSTEM_ZONE), rule.get(), dayPunches);
+                status = result.status();
+                late = result.late();
+                early = result.early();
+            }
+        }
         jdbcTemplate.update("""
-            INSERT INTO oa_attendance_day_summary(company_id,user_id,punch_date,first_punch_time,last_punch_time,punch_count,day_type,status,rule_year_id,rule_revision,calculated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,NOW())
-            ON DUPLICATE KEY UPDATE first_punch_time=VALUES(first_punch_time),last_punch_time=VALUES(last_punch_time),punch_count=VALUES(punch_count),day_type=VALUES(day_type),status=VALUES(status),rule_year_id=VALUES(rule_year_id),rule_revision=VALUES(rule_revision),calculated_at=NOW(),version=version+1
-            """,companyId,userId,date,punches.get("firstPunchTime"),punches.get("lastPunchTime"),count,dayType,status,ruleId,revision);
+                INSERT INTO oa_attendance_day_summary(
+                    company_id,user_id,punch_date,first_punch_time,last_punch_time,punch_count,
+                    day_type,status,leave_type,rule_year_id,rule_revision,is_late,is_early,calculated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
+                ON DUPLICATE KEY UPDATE first_punch_time=VALUES(first_punch_time),
+                    last_punch_time=VALUES(last_punch_time),punch_count=VALUES(punch_count),
+                    day_type=VALUES(day_type),status=VALUES(status),leave_type=VALUES(leave_type),
+                    rule_year_id=VALUES(rule_year_id),rule_revision=VALUES(rule_revision),
+                    is_late=VALUES(is_late),is_early=VALUES(is_early),calculated_at=NOW(),version=version+1
+                """, companyId, userId, date, punches.get("firstPunchTime"), punches.get("lastPunchTime"),
+                count, dayType.name(), status, leaveType, calendar.ruleId(), calendar.revision(), late, early);
         return findSummary(companyId,userId,date);
     }
 
-    static String resolveStatus(boolean companyHoliday,boolean personalHoliday,int punchCount){if(companyHoliday)return "COMPANY_HOLIDAY";if(personalHoliday)return "PERSONAL_HOLIDAY";if(punchCount==0)return "ABSENT";return punchCount==1?"SINGLE":"NORMAL";}
+    static String resolveStatus(boolean companyHoliday, boolean personalHoliday, int punchCount, String leaveType) {
+        if (companyHoliday) return "COMPANY_HOLIDAY";
+        if (personalHoliday) return "PERSONAL_HOLIDAY";
+        if (leaveType != null) return "ON_LEAVE";
+        if (punchCount == 0) return "ABSENT";
+        return punchCount == 1 ? "SINGLE" : "NORMAL";
+    }
 
     @Transactional
     protected Map<String, Object> appendPunch(Long companyId, long userId, Long operatorUserId, LocalDate date,
             LocalDateTime punchTime, String punchType, String source, String ip, String userAgent,
             PunchInput input, Long correctionRequestId) {
+        String validType = punchType(punchType);
         return withDayLock(companyId, userId, date, () -> {
             jdbcTemplate.update("""
                     INSERT INTO oa_attendance_punch
                         (company_id, user_id, operator_user_id, correction_request_id, punch_date, punch_time, punch_type, source,
                          client_ip, user_agent, latitude, longitude, location_accuracy, location_source, client_captured_at, timezone, remark)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, companyId, userId, operatorUserId, correctionRequestId, date, punchTime, punchType, source,
+                    """, companyId, userId, operatorUserId, correctionRequestId, date, punchTime, validType, source,
                     ip, truncate(userAgent, 512), input == null ? null : input.latitude(), input == null ? null : input.longitude(),
                     input == null ? null : input.accuracy(), input == null ? null : input.locationSource(),
                     input == null ? null : parseCapturedAt(input.capturedAt()), SYSTEM_ZONE.getId(), input == null ? null : truncate(input.remark(), 255));
@@ -215,7 +263,7 @@ public class AttendanceService {
         Integer duplicate=jdbcTemplate.queryForObject("SELECT COUNT(*) FROM oa_attendance_correction_request WHERE company_id=? AND user_id=? AND attendance_date=? AND status='PENDING'",Integer.class,user.companyId(),user.id(),time.toLocalDate());
         if(duplicate!=null&&duplicate>0)throw bad("该日期已有待审批的补打卡申请");
         try {
-            jdbcTemplate.update("INSERT INTO oa_attendance_correction_request(company_id,user_id,approver_user_id,attendance_date,punch_type,requested_punch_time,latitude,longitude,location_accuracy,location_source,location_address,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",user.companyId(),user.id(),approver,time.toLocalDate(),input.punchType()==null?"NORMAL":input.punchType(),time,input.latitude(),input.longitude(),input.accuracy(),input.locationSource(),trim(input.locationAddress()),input.reason().trim());
+            jdbcTemplate.update("INSERT INTO oa_attendance_correction_request(company_id,user_id,approver_user_id,attendance_date,punch_type,requested_punch_time,latitude,longitude,location_accuracy,location_source,location_address,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",user.companyId(),user.id(),approver,time.toLocalDate(),punchType(input.punchType()),time,input.latitude(),input.longitude(),input.accuracy(),input.locationSource(),trim(input.locationAddress()),input.reason().trim());
         } catch (org.springframework.dao.DuplicateKeyException exception) {
             throw bad("该日期已有待审批的补打卡申请");
         }
@@ -225,7 +273,7 @@ public class AttendanceService {
     public List<Map<String,Object>> listMyCorrections(ManagementUser user){ensureCompanyUser(user);return jdbcTemplate.queryForList("SELECT id,attendance_date attendanceDate,punch_type punchType,requested_punch_time requestedPunchTime,latitude,longitude,location_address locationAddress,status,reason,review_comment reviewComment FROM oa_attendance_correction_request WHERE company_id=? AND user_id=? ORDER BY id DESC",user.companyId(),user.id());}
     public List<Map<String,Object>> listPendingCorrections(ManagementUser user){requirePermission(user,"oa:attendance:correction:review");ensureCompanyUser(user);return jdbcTemplate.queryForList("SELECT r.id,r.user_id userId,u.display_name userName,r.attendance_date attendanceDate,r.punch_type punchType,r.requested_punch_time requestedPunchTime,r.latitude,r.longitude,r.location_address locationAddress,r.reason,r.status FROM oa_attendance_correction_request r JOIN sys_user u ON u.id=r.user_id WHERE r.company_id=? AND r.approver_user_id=? AND r.status='PENDING' ORDER BY r.created_at",user.companyId(),user.id());}
 
-    @Transactional public Map<String,Object> decideCorrection(ManagementUser user,long id,boolean approve,String comment){requirePermission(user,"oa:attendance:correction:review");ensureCompanyUser(user);Map<String,Object> r=jdbcTemplate.queryForMap("SELECT * FROM oa_attendance_correction_request WHERE company_id=? AND id=? AND approver_user_id=? FOR UPDATE",user.companyId(),id,user.id());if(!"PENDING".equals(r.get("status")))throw bad("申请不在待审批状态");if(!approve&& (comment==null||comment.isBlank()))throw bad("请填写驳回理由");String status=approve?"APPROVED":"REJECTED";jdbcTemplate.update("UPDATE oa_attendance_correction_request SET status=?,review_comment=?,reviewed_by=?,reviewed_at=NOW(),version=version+1 WHERE company_id=? AND id=? AND status='PENDING'",status,trim(comment),user.id(),user.companyId(),id);if(approve){long target=((Number)r.get("user_id")).longValue();LocalDate date=(r.get("attendance_date") instanceof java.sql.Date d)?d.toLocalDate():LocalDate.parse(r.get("attendance_date").toString());LocalDateTime time=toLocalDateTime(r.get("requested_punch_time"));PunchInput input=new PunchInput((BigDecimal)r.get("latitude"),(BigDecimal)r.get("longitude"),(BigDecimal)r.get("location_accuracy"), (String)r.get("location_source"),null,(String)r.get("reason"));appendPunch(user.companyId(),target,user.id(),date,time,(String)r.get("punch_type"),"CORRECTION",null,null,input,id);}return Map.of("id",id,"status",status);}
+    @Transactional public Map<String,Object> decideCorrection(ManagementUser user,long id,boolean approve,String comment){requirePermission(user,"oa:attendance:correction:review");ensureCompanyUser(user);Map<String,Object> r=jdbcTemplate.queryForMap("SELECT * FROM oa_attendance_correction_request WHERE company_id=? AND id=? AND approver_user_id=? FOR UPDATE",user.companyId(),id,user.id());if(((Number)r.get("user_id")).longValue()==user.id())throw bad("申请人不能审批自己的补卡申请");if(!"PENDING".equals(r.get("status")))throw bad("申请不在待审批状态");if(!approve&& (comment==null||comment.isBlank()))throw bad("请填写驳回理由");String status=approve?"APPROVED":"REJECTED";jdbcTemplate.update("UPDATE oa_attendance_correction_request SET status=?,review_comment=?,reviewed_by=?,reviewed_at=NOW(),version=version+1 WHERE company_id=? AND id=? AND status='PENDING'",status,trim(comment),user.id(),user.companyId(),id);if(approve){long target=((Number)r.get("user_id")).longValue();LocalDate date=(r.get("attendance_date") instanceof java.sql.Date d)?d.toLocalDate():LocalDate.parse(r.get("attendance_date").toString());LocalDateTime time=toLocalDateTime(r.get("requested_punch_time"));PunchInput input=new PunchInput((BigDecimal)r.get("latitude"),(BigDecimal)r.get("longitude"),(BigDecimal)r.get("location_accuracy"), (String)r.get("location_source"),null,(String)r.get("reason"));appendPunch(user.companyId(),target,user.id(),date,time,(String)r.get("punch_type"),"CORRECTION",null,null,input,id);}return Map.of("id",id,"status",status);}
 
     private LocalDateTime toLocalDateTime(Object value){if(value instanceof java.sql.Timestamp timestamp)return timestamp.toLocalDateTime();if(value instanceof LocalDateTime dateTime)return dateTime;if(value instanceof java.util.Date date)return date.toInstant().atZone(SYSTEM_ZONE).toLocalDateTime();return LocalDateTime.parse(String.valueOf(value).replace(' ','T'));}
 
@@ -289,17 +337,31 @@ public class AttendanceService {
     private void validateLocation(AdminPunchInput input, boolean required) { validateLocation(input==null?null:new PunchInput(input.latitude(),input.longitude(),input.accuracy(),input.locationSource(),input.capturedAt(),input.remark()),required); }
     private void validateLocation(CorrectionInput input, boolean required) { validateLocation(input==null?null:new PunchInput(input.latitude(),input.longitude(),input.accuracy(),input.locationSource(),null,input.reason()),required); }
 
-    private long directManager(ManagementUser user){
-        List<Long> orgs=jdbcTemplate.query("SELECT p.org_unit_id FROM sys_user_position up JOIN sys_position p ON p.id=up.position_id AND p.status='ENABLED' AND p.deleted_at IS NULL WHERE up.company_id=? AND up.user_id=? AND up.status='ENABLED' AND up.deleted_at IS NULL ORDER BY up.id",(rs,n)->rs.getLong(1),user.companyId(),user.id());
-        for(Long orgId:orgs){String path=jdbcTemplate.queryForObject("SELECT org_path FROM sys_org_unit WHERE company_id=? AND id=? AND deleted_at IS NULL",String.class,user.companyId(),orgId);for(Map<String,Object> row:jdbcTemplate.queryForList("SELECT manager_user_id managerUserId,manager_position_id managerPositionId FROM sys_org_unit WHERE company_id=? AND status='ENABLED' AND deleted_at IS NULL AND ? LIKE CONCAT(org_path,'%') ORDER BY org_level DESC",user.companyId(),path)){Long manager=row.get("managerUserId")==null?null:((Number)row.get("managerUserId")).longValue();if(manager==null&&row.get("managerPositionId")!=null){List<Long> people=jdbcTemplate.query("SELECT user_id FROM sys_user_position WHERE company_id=? AND position_id=? AND status='ENABLED' AND deleted_at IS NULL ORDER BY id LIMIT 1",(rs,n)->rs.getLong(1),user.companyId(),row.get("managerPositionId"));if(!people.isEmpty())manager=people.get(0);}if(manager!=null&&manager!=user.id())return manager;}}
-        throw bad("未找到直属负责人，请联系管理员配置组织负责人");
+    private long directManager(ManagementUser user) {
+        var manager = OrganizationApprovers.nearest(jdbcTemplate, user.companyId(), user.id(), "oa:attendance:correction:review");
+        if (manager == null) throw bad("本部门及上级组织未找到有效且有补卡审批权限的负责人，请联系管理员配置");
+        return ((Number)manager.get("id")).longValue();
+    }
+
+    private String punchType(String value) {
+        String type = value == null ? "NORMAL" : value;
+        if (!List.of("NORMAL", "IN", "OUT").contains(type)) throw bad("请选择有效的上班或下班打卡类型");
+        return type;
     }
 
     private ManagementException bad(String message){return new ManagementException(HttpStatus.BAD_REQUEST,message);}
     private String trim(String value){return value==null||value.isBlank()?null:value.trim();}
     private void requirePermission(ManagementUser user,String permission){if(user==null||user.companyId()==null)throw new ManagementException(HttpStatus.FORBIDDEN,"账号未关联公司");if(user.roles().contains("PLATFORM_ADMIN")||user.roles().contains("COMPANY_ADMIN")||user.permissions().contains("*")||user.permissions().contains(permission))return;throw new ManagementException(HttpStatus.FORBIDDEN,"当前岗位未配置操作权限："+permission);}
-    public record PunchInput(BigDecimal latitude,BigDecimal longitude,BigDecimal accuracy,String locationSource,String capturedAt,String remark) {}
-    public record AdminPunchInput(BigDecimal latitude,BigDecimal longitude,BigDecimal accuracy,String locationSource,String capturedAt,String remark) {}
+    public record PunchInput(BigDecimal latitude,BigDecimal longitude,BigDecimal accuracy,String locationSource,String capturedAt,String remark,String punchType) {
+        public PunchInput(BigDecimal latitude,BigDecimal longitude,BigDecimal accuracy,String locationSource,String capturedAt,String remark) {
+            this(latitude,longitude,accuracy,locationSource,capturedAt,remark,null);
+        }
+    }
+    public record AdminPunchInput(BigDecimal latitude,BigDecimal longitude,BigDecimal accuracy,String locationSource,String capturedAt,String remark,String punchType) {
+        public AdminPunchInput(BigDecimal latitude,BigDecimal longitude,BigDecimal accuracy,String locationSource,String capturedAt,String remark) {
+            this(latitude,longitude,accuracy,locationSource,capturedAt,remark,null);
+        }
+    }
     public record CorrectionInput(String requestedPunchTime,String punchType,BigDecimal latitude,BigDecimal longitude,BigDecimal accuracy,String locationSource,String locationAddress,String reason) {}
     private record Filter(Long orgUnitId, String keyword) {}
 }

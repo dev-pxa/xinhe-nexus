@@ -68,7 +68,7 @@ public class CrmSalesService {
 
     public List<Map<String,Object>> pendingApprovals(ManagementUser u) {
         require(u,"crm:sales-order:approve");
-        return db.queryForList("SELECT o.id,o.application_no applicationNo,o.customer_name_snapshot customerName,o.total_amount totalAmount,o.created_at createdAt,s.display_name salespersonName,TRUE canApprove FROM crm_sales_order o JOIN sys_user s ON s.id=o.salesperson_user_id WHERE o.company_id=? AND o.approval_status='PENDING_APPROVAL' AND ("+salesOrderManagerScope(u)+") ORDER BY o.created_at",u.companyId());
+        return db.queryForList("SELECT o.id,o.application_no applicationNo,o.customer_name_snapshot customerName,o.total_amount totalAmount,o.created_at createdAt,s.display_name salespersonName,TRUE canApprove FROM crm_sales_order o JOIN sys_user s ON s.id=o.salesperson_user_id WHERE o.company_id=? AND o.approval_status='PENDING_APPROVAL' AND o.created_by<>"+u.id()+" AND ("+salesOrderManagerScope(u)+") ORDER BY o.created_at",u.companyId());
     }
 
     public Map<String,Object> order(ManagementUser u,long id) {
@@ -79,7 +79,7 @@ public class CrmSalesService {
                    o.phone_snapshot phone,o.shipping_address_snapshot shippingAddress,o.salesperson_user_id salespersonUserId,
                    s.display_name salespersonName,o.approval_status approvalStatus,o.total_amount totalAmount,o.remark,
                    o.approver_user_id approverUserId,o.approval_comment approvalComment,o.approved_at approvedAt,
-                   o.erp_order_id erpOrderId,e.order_no orderNo,e.fulfillment_status fulfillmentStatus,o.version,o.created_at createdAt
+                   o.created_by AS applicantUserId,o.erp_order_id erpOrderId,e.order_no orderNo,e.fulfillment_status fulfillmentStatus,o.version,o.created_at createdAt
             FROM crm_sales_order o JOIN sys_user s ON s.id=o.salesperson_user_id
             LEFT JOIN erp_sales_fulfillment_order e ON e.id=o.erp_order_id AND e.company_id=o.company_id
             WHERE o.company_id=? AND o.id=?
@@ -87,7 +87,7 @@ public class CrmSalesService {
         if(rows.isEmpty())throw new ManagementException(HttpStatus.NOT_FOUND,"销售订单不存在");
         Map<String,Object> result=rows.get(0);
         if(result.get("approvalComment") instanceof String approvalComment)result.put("approvalComment",sanitizeRichText(approvalComment));
-        result.put("canApprove",canManageOrder(u,id));
+        result.put("canApprove", !(result.get("applicantUserId") instanceof Number creator && creator.longValue()==u.id()) && canManageOrder(u,id));
         result.put("lines",db.queryForList("SELECT id,line_no lineNo,product_id productId,product_code_snapshot productCode,product_name_snapshot productName,category_name_snapshot categoryName,product_model_snapshot model,product_specification_snapshot specification,quantity,unit_price unitPrice,amount FROM crm_sales_order_line WHERE company_id=? AND order_id=? ORDER BY line_no",u.companyId(),id));
         List<Map<String,Object>> logs=db.queryForList("SELECT action,from_status fromStatus,to_status toStatus,opinion,operated_at operatedAt,u.display_name operatedByName FROM crm_sales_order_log l JOIN sys_user u ON u.id=l.operated_by WHERE l.company_id=? AND l.order_id=? ORDER BY l.id",u.companyId(),id);
         for(Map<String,Object> log:logs)if(log.get("opinion") instanceof String opinion)log.put("opinion",sanitizeRichText(opinion));
@@ -142,6 +142,9 @@ public class CrmSalesService {
         if(rows.isEmpty())throw new ManagementException(HttpStatus.NOT_FOUND,"销售订单不存在");
         Map<String,Object> order=rows.get(0);
         if(!"PENDING_APPROVAL".equals(order.get("approval_status")))throw new ManagementException(HttpStatus.BAD_REQUEST,"订单不在待审核状态");
+        if(order.get("created_by") instanceof Number creator && creator.longValue()==u.id()) {
+            throw new ManagementException(HttpStatus.FORBIDDEN,"申请人不能审批自己的销售订单");
+        }
         if(!canManageOrder(u,id))throw new ManagementException(HttpStatus.FORBIDDEN,"你不是该销售人员组织链上的负责人，无权审批此订单");
         String safeOpinion=sanitizeRichText(opinion);
         if(!approve){db.update("UPDATE crm_sales_order SET approval_status='REJECTED',approval_comment=?,version=version+1,updated_by=? WHERE company_id=? AND id=?",safeOpinion,u.id(),u.companyId(),id);log(u,id,"REJECT","PENDING_APPROVAL","REJECTED",safeOpinion);return order(u,id);}
@@ -180,7 +183,12 @@ public class CrmSalesService {
         return !db.queryForList("SELECT o.id FROM crm_sales_order o WHERE o.company_id=? AND o.id=? AND ("+salesOrderManagerScope(u)+")",u.companyId(),id).isEmpty();
     }
     private void ensureCustomerVisible(ManagementUser u,long id){if(admin(u))return;Integer n=db.queryForObject("SELECT COUNT(*) FROM crm_customer c WHERE c.company_id=? AND c.id=? AND c.deleted_at IS NULL AND (c.owner_user_id=? OR EXISTS(SELECT 1 FROM crm_customer_collaborator cc WHERE cc.company_id=c.company_id AND cc.customer_id=c.id AND cc.user_id=? AND cc.deleted_at IS NULL))",Integer.class,u.companyId(),id,u.id(),u.id());if(n==null||n==0)throw new ManagementException(HttpStatus.NOT_FOUND,"客户不存在或无权查看");}
-    private long departmentApprover(ManagementUser u){List<Long> orgs=db.query("SELECT p.org_unit_id FROM sys_user_position up JOIN sys_position p ON p.id=up.position_id AND p.status='ENABLED' AND p.deleted_at IS NULL WHERE up.company_id=? AND up.user_id=? AND up.status='ENABLED' AND up.deleted_at IS NULL ORDER BY up.id",(rs,n)->rs.getLong(1),u.companyId(),u.id());for(Long orgId:orgs){String path=db.queryForObject("SELECT org_path FROM sys_org_unit WHERE company_id=? AND id=?",String.class,u.companyId(),orgId);for(Map<String,Object> org:db.queryForList("SELECT manager_user_id managerUserId,manager_position_id managerPositionId FROM sys_org_unit WHERE company_id=? AND deleted_at IS NULL AND status='ENABLED' AND ? LIKE CONCAT(org_path,'%') ORDER BY org_level DESC",u.companyId(),path)){Long manager=org.get("managerUserId")==null?null:((Number)org.get("managerUserId")).longValue();if(manager==null&&org.get("managerPositionId")!=null){List<Long> people=db.query("SELECT user_id FROM sys_user_position WHERE company_id=? AND position_id=? AND status='ENABLED' AND deleted_at IS NULL ORDER BY id LIMIT 1",(rs,n)->rs.getLong(1),u.companyId(),org.get("managerPositionId"));if(!people.isEmpty())manager=people.get(0);}if(manager!=null&&manager!=u.id())return manager;}}throw bad("未找到可审批的部门负责人，请联系管理员配置");}
+    private long departmentApprover(ManagementUser user) {
+        var manager = OrganizationApprovers.nearest(db, user.companyId(), user.id(), "crm:sales-order:approve");
+        if (manager == null) throw bad("本部门及上级组织未找到有效且有销售订单审批权限的负责人，请联系管理员配置");
+        return ((Number)manager.get("id")).longValue();
+    }
+
     private long nextNumber(long companyId,String type){db.update("INSERT INTO erp_number_sequence(company_id,document_type,current_value) VALUES(?,?,1) ON DUPLICATE KEY UPDATE current_value=current_value+1",companyId,type);return db.queryForObject("SELECT current_value FROM erp_number_sequence WHERE company_id=? AND document_type=?",Long.class,companyId,type);}
     private void log(ManagementUser u,long id,String action,String from,String to,String opinion){db.update("INSERT INTO crm_sales_order_log(company_id,order_id,action,from_status,to_status,opinion,operated_by) VALUES(?,?,?,?,?,?,?)",u.companyId(),id,action,from,to,trim(opinion),u.id());}
     /** 审批意见按允许标签净化，移除脚本、样式、事件属性及其他可执行内容。 */

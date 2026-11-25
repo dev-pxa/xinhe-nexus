@@ -11,6 +11,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
@@ -30,6 +31,7 @@ public class AttendanceSettlementService {
         this.attendance = attendance;
         this.clock = Clock.system(ZONE);
         TransactionTemplate template = new TransactionTemplate(transactionManager);
+        template.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.transactions = action -> template.executeWithoutResult(status -> action.run());
     }
 
@@ -106,7 +108,7 @@ public class AttendanceSettlementService {
                 WHERE uc.company_id=? AND DATE(uc.joined_at)<=? AND (uc.left_at IS NULL OR DATE(uc.left_at)>=?)
                   AND (uc.deleted_at IS NULL OR DATE(uc.deleted_at)>?) AND (u.deleted_at IS NULL OR DATE(u.deleted_at)>?)
                   AND (COALESCE(p.punch_count,0)=0 OR s.id IS NULL
-                       OR s.punch_count<>p.punch_count OR s.status='RULE_MISSING')
+                       OR s.punch_count<>p.punch_count OR s.status IN ('RULE_MISSING','ON_LEAVE','WAITING_IN','WAITING_OUT'))
                 ORDER BY uc.user_id
                 """, Long.class, companyId, date, date, companyId, date, date, date, date);
             db.update("""

@@ -12,11 +12,24 @@ import static org.mockito.Mockito.when;
 
 import com.xinhe.nexus.management.auth.ManagementUser;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 class CrmSalesServiceTest {
+
+    @Test
+    void applicantCannotApproveOwnSalesOrderEvenAsAdministrator() {
+        JdbcTemplate db = mock(JdbcTemplate.class);
+        when(db.queryForList(anyString(),any(Object[].class)))
+                .thenReturn(List.of(Map.of("approval_status","PENDING_APPROVAL","created_by",10L)));
+        CrmSalesService service = new CrmSalesService(db);
+        ManagementUser applicant = new ManagementUser(10L,8L,"公司","user","申请人",
+                List.of("COMPANY_ADMIN"),List.of("*"),false,1L);
+        org.junit.jupiter.api.Assertions.assertThrows(ManagementException.class,
+                () -> service.decide(applicant,88L,true,""));
+    }
 
     @Test
     void companyAdminOrderListKeepsScopeSeparatedFromAndKeyword() {

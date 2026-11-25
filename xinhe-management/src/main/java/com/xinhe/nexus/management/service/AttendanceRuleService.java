@@ -31,8 +31,15 @@ public class AttendanceRuleService {
     public Map<String,Object> getYear(ManagementUser user, int year) {
         requireAdmin(user); validateYear(year);
         List<Map<String,Object>> heads=db.queryForList("SELECT id,status,company_configured companyConfigured,draft_revision draftRevision,published_revision publishedRevision,version,published_at publishedAt FROM oa_attendance_rule_year WHERE company_id=? AND rule_year=?",user.companyId(),year);
-        if(heads.isEmpty()) return Map.of("year",year,"status","UNCONFIGURED","companyConfigured",false,"draftRevision",1,"version",0,"companyHolidayDates",List.of(),"conflicts",List.of(),"requiredPersonalHolidayCount",requiredPersonalHolidayCount(year));
+        if(heads.isEmpty()) {
+            Map<String,Object> empty = new LinkedHashMap<>(Map.of("year",year,"status","UNCONFIGURED","companyConfigured",false,"draftRevision",1,"version",0,"companyHolidayDates",List.of(),"conflicts",List.of(),"requiredPersonalHolidayCount",requiredPersonalHolidayCount(year)));
+            empty.put("timeRanges", List.of());
+            empty.put("timeExemptDates", List.of());
+            return empty;
+        }
         Map<String,Object> out=new LinkedHashMap<>(heads.get(0)); long id=num(out.get("id")); int rev=num(out.get("draftRevision"));
+        out.put("timeRanges", AttendanceTimeRules.load(db, id, rev));
+        out.put("timeExemptDates", AttendanceTimeRules.exemptDates(db, user.companyId(), id, rev).stream().sorted().map(LocalDate::toString).toList());
         out.put("year",year); out.put("requiredPersonalHolidayCount",requiredPersonalHolidayCount(year)); out.put("companyHolidayDates",dates("SELECT DATE_FORMAT(holiday_date,'%Y-%m-%d') d FROM oa_attendance_company_holiday WHERE rule_year_id=? AND revision=? ORDER BY holiday_date",id,rev)); out.put("conflicts",conflicts(id,rev)); return out;
     }
 
@@ -57,6 +64,56 @@ public class AttendanceRuleService {
         Set<String> company=new LinkedHashSet<>((List<String>)annual.get("companyHolidayDates")); List<String> collisions=personal.stream().filter(company::contains).toList();
         int required=id==null?requiredPersonalHolidayCount(year):requiredPersonalHolidayCount(year,((Number)id).longValue(),num(annual.get("draftRevision")),userId);
         return Map.of("year",year,"userId",userId,"companyHolidayDates",company,"personalHolidayDates",personal,"conflictDates",collisions,"companyConfigured",annual.get("companyConfigured"),"version",annual.get("version"),"requiredPersonalHolidayCount",required);
+    }
+
+    @Transactional
+    public Map<String,Object> saveTimes(ManagementUser user, int year, TimeInput input) {
+        requireAdmin(user);
+        validateYear(year);
+        if (input == null) throw bad("请填写考勤时间");
+        var head = lockOrCreate(user, year);
+        long id = ((Number) head.get("id")).longValue();
+        int revision = num(head.get("draftRevision"));
+        var exemptions = AttendanceTimeRules.exemptDates(db, user.companyId(), id, revision);
+        AttendanceTimeRules.requireCoverage(year, input.ranges(), exemptions);
+        if (head.get("publishedRevision") != null) {
+            AttendanceTimeRules.freezePast(year, AttendanceTimeRules.load(db, id, num(head.get("publishedRevision"))),
+                    input.ranges(), LocalDate.now(clock), exemptions);
+        }
+        head = ensureDraft(user, head);
+        revision = num(head.get("draftRevision"));
+        db.update("DELETE FROM oa_attendance_time_range WHERE rule_year_id=? AND revision=?", id, revision);
+        for (var range : input.ranges()) {
+            db.update("""
+                    INSERT INTO oa_attendance_time_range(rule_year_id,revision,start_date,end_date,start_time,end_time,flexible_minutes)
+                    VALUES(?,?,?,?,?,?,?)
+                    """, id, revision, range.startDate(), range.endDate(), range.startTime(), range.endTime(), range.flexibleMinutes());
+        }
+        db.update("UPDATE oa_attendance_rule_year SET status='DRAFT',version=version+1,updated_by=? WHERE id=?", user.id(), id);
+        log(user, id, revision, "SAVE_TIMES", null, input.ranges().stream().map(Object::toString).toList());
+        return getYear(user, year);
+    }
+
+    public Map<String,Object> mySchedule(ManagementUser user, LocalDate date) {
+        if (user == null || user.companyId() == null) throw new ManagementException(HttpStatus.FORBIDDEN, "仅公司员工可以查看考勤时间");
+        if (date == null) throw bad("请选择日期");
+        var calendar = AttendanceCalendar.load(db, user.companyId(), user.id(), date, date);
+        String status = calendar.configured() ? calendar.dayType(date).name() : "UNCONFIGURED";
+        Map<String,Object> out = new LinkedHashMap<>();
+        out.put("date", date.toString());
+        out.put("status", status);
+        if ("WORKDAY".equals(status)) {
+            var range = AttendanceTimeRules.load(db, calendar.ruleId(), calendar.revision()).stream()
+                    .filter(r -> !date.isBefore(r.startDate()) && !date.isAfter(r.endDate())).findFirst();
+            if (range.isPresent()) {
+                out.put("startTime", range.get().startTime().toString());
+                out.put("endTime", range.get().endTime().toString());
+                out.put("flexibleMinutes", range.get().flexibleMinutes());
+            } else {
+                out.put("status", "UNCONFIGURED");
+            }
+        }
+        return out;
     }
 
     @Transactional
@@ -92,10 +149,12 @@ public class AttendanceRuleService {
             WHERE uc.company_id=? AND uc.status='ENABLED' AND uc.deleted_at IS NULL
             GROUP BY u.id,u.display_name,cfg.user_id ORDER BY u.display_name,u.id
             """,id,rev,id,rev,LocalDate.now(clock),user.companyId());List<Map<String,Object>> invalidUsers=new ArrayList<>();for(Map<String,Object> row:candidates){long targetId=((Number)row.get("configuredUserId")==null)?0:((Number)row.get("configuredUserId")).longValue();int required=targetId==0?requiredPersonalHolidayCount(year):requiredPersonalHolidayCount(year,id,rev,targetId);if(targetId==0||num(row.get("holidayCount"))!=required){row.put("requiredCount",required);invalidUsers.add(row);}}if(!invalidUsers.isEmpty()){String examples=invalidUsers.stream().limit(5).map(r->r.get("userName")+"（当前"+r.get("holidayCount")+"天/应"+r.get("requiredCount")+"天）").collect(java.util.stream.Collectors.joining("、"));throw bad("每位员工剩余个人放假必须按首次配置基线补足；待完善："+examples+(invalidUsers.size()>5?"等"+invalidUsers.size()+"人":""));}List<Map<String,Object>> conflicts=conflicts(id,rev);if(!conflicts.isEmpty())throw bad("仍有个人放假与公司放假冲突，请先完成调整");
+        AttendanceTimeRules.requireCoverage(year, AttendanceTimeRules.load(db, id, rev),
+                AttendanceTimeRules.exemptDates(db, user.companyId(), id, rev));
         db.update("UPDATE oa_attendance_rule_year SET status='PUBLISHED',published_revision=draft_revision,published_by=?,published_at=NOW(),version=version+1,updated_by=? WHERE id=?",user.id(),user.id(),id);log(user,id,rev,"PUBLISH",null,Set.of());return getYear(user,year);
     }
 
-    private Map<String,Object> ensureDraft(ManagementUser u,Map<String,Object> h){Object pub=h.get("publishedRevision");int rev=num(h.get("draftRevision"));if(pub!=null&&num(pub)==rev){int next=rev+1;long id=num(h.get("id"));db.update("INSERT INTO oa_attendance_company_holiday(rule_year_id,company_id,revision,holiday_date,created_by) SELECT rule_year_id,company_id,?,holiday_date,? FROM oa_attendance_company_holiday WHERE rule_year_id=? AND revision=?",next,u.id(),id,rev);db.update("INSERT INTO oa_attendance_user_holiday(rule_year_id,company_id,revision,user_id,holiday_date,created_by) SELECT rule_year_id,company_id,?,user_id,holiday_date,? FROM oa_attendance_user_holiday WHERE rule_year_id=? AND revision=?",next,u.id(),id,rev);db.update("INSERT INTO oa_attendance_user_rule_config(rule_year_id,company_id,revision,user_id,implicit_holiday_credit,baseline_date,configured_by,configured_at) SELECT rule_year_id,company_id,?,user_id,implicit_holiday_credit,baseline_date,?,configured_at FROM oa_attendance_user_rule_config WHERE rule_year_id=? AND revision=?",next,u.id(),id,rev);db.update("UPDATE oa_attendance_rule_year SET draft_revision=?,status='DRAFT',updated_by=? WHERE id=?",next,u.id(),id);h.put("draftRevision",next);}return h;}
+    private Map<String,Object> ensureDraft(ManagementUser u,Map<String,Object> h){Object pub=h.get("publishedRevision");int rev=num(h.get("draftRevision"));if(pub!=null&&num(pub)==rev){int next=rev+1;long id=num(h.get("id"));db.update("INSERT INTO oa_attendance_time_range(rule_year_id,revision,start_date,end_date,start_time,end_time,flexible_minutes) SELECT rule_year_id,?,start_date,end_date,start_time,end_time,flexible_minutes FROM oa_attendance_time_range WHERE rule_year_id=? AND revision=?",next,id,rev);db.update("INSERT INTO oa_attendance_company_holiday(rule_year_id,company_id,revision,holiday_date,created_by) SELECT rule_year_id,company_id,?,holiday_date,? FROM oa_attendance_company_holiday WHERE rule_year_id=? AND revision=?",next,u.id(),id,rev);db.update("INSERT INTO oa_attendance_user_holiday(rule_year_id,company_id,revision,user_id,holiday_date,created_by) SELECT rule_year_id,company_id,?,user_id,holiday_date,? FROM oa_attendance_user_holiday WHERE rule_year_id=? AND revision=?",next,u.id(),id,rev);db.update("INSERT INTO oa_attendance_user_rule_config(rule_year_id,company_id,revision,user_id,implicit_holiday_credit,baseline_date,configured_by,configured_at) SELECT rule_year_id,company_id,?,user_id,implicit_holiday_credit,baseline_date,?,configured_at FROM oa_attendance_user_rule_config WHERE rule_year_id=? AND revision=?",next,u.id(),id,rev);db.update("UPDATE oa_attendance_rule_year SET draft_revision=?,status='DRAFT',updated_by=? WHERE id=?",next,u.id(),id);h.put("draftRevision",next);}return h;}
     private Map<String,Object> lockOrCreate(ManagementUser u,int y){List<Map<String,Object>> rows=db.queryForList("SELECT id,status,company_configured companyConfigured,draft_revision draftRevision,published_revision publishedRevision,version FROM oa_attendance_rule_year WHERE company_id=? AND rule_year=? FOR UPDATE",u.companyId(),y);if(rows.isEmpty()){db.update("INSERT INTO oa_attendance_rule_year(company_id,rule_year,created_by,updated_by) VALUES(?,?,?,?)",u.companyId(),y,u.id(),u.id());rows=db.queryForList("SELECT id,status,company_configured companyConfigured,draft_revision draftRevision,published_revision publishedRevision,version FROM oa_attendance_rule_year WHERE company_id=? AND rule_year=? FOR UPDATE",u.companyId(),y);}return new LinkedHashMap<>(rows.get(0));}
     private Map<String,Object> lockExisting(ManagementUser u,int y){Map<String,Object> h=lockOrCreate(u,y);return h;}
     private List<Map<String,Object>> conflicts(long id,int rev){List<Map<String,Object>> rows=db.queryForList("SELECT h.user_id userId,u.display_name userName,DATE_FORMAT(h.holiday_date,'%Y-%m-%d') conflictDate FROM oa_attendance_user_holiday h JOIN oa_attendance_company_holiday c ON c.rule_year_id=h.rule_year_id AND c.revision=h.revision AND c.holiday_date=h.holiday_date JOIN sys_user u ON u.id=h.user_id WHERE h.rule_year_id=? AND h.revision=? ORDER BY u.display_name,h.holiday_date",id,rev);Map<Long,Map<String,Object>> grouped=new LinkedHashMap<>();for(var r:rows){long uid=num(r.get("userId"));var g=grouped.computeIfAbsent(uid,k->{var m=new LinkedHashMap<String,Object>();m.put("userId",uid);m.put("userName",r.get("userName"));m.put("dates",new ArrayList<String>());return m;});((List<String>)g.get("dates")).add(String.valueOf(r.get("conflictDate")));}return new ArrayList<>(grouped.values());}
@@ -115,6 +174,7 @@ public class AttendanceRuleService {
     private void log(ManagementUser u,long id,int rev,String action,Long target,Object detail){try{db.update("INSERT INTO oa_attendance_rule_change_log(rule_year_id,company_id,revision,action,target_user_id,detail_json,operator_user_id) VALUES(?,?,?,?,?,?,?)",id,u.companyId(),rev,action,target,json.writeValueAsString(detail),u.id());}catch(JsonProcessingException e){throw new IllegalStateException(e);}}
     private int num(Object v){if(v==null)return 0;if(v instanceof Boolean b)return b?1:0;return ((Number)v).intValue();}
     private ManagementException bad(String m){return new ManagementException(HttpStatus.BAD_REQUEST,m);}
+    public record TimeInput(List<AttendanceTimeRules.Range> ranges) {}
     public record DatesInput(List<String> dates,Integer version){}
     public record VersionInput(Integer version){}
 }

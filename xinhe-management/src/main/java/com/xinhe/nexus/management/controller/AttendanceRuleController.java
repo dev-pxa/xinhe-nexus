@@ -4,6 +4,8 @@ import com.xinhe.nexus.common.api.ApiResponse;
 import com.xinhe.nexus.management.auth.AuthConstants;
 import com.xinhe.nexus.management.auth.ManagementUser;
 import com.xinhe.nexus.management.service.AttendanceRuleService;
+import java.time.LocalDate;
+import org.springframework.format.annotation.DateTimeFormat;
 import java.util.List;
 import java.util.Map;
 import org.springframework.web.bind.annotation.*;
@@ -13,6 +15,16 @@ import org.springframework.web.bind.annotation.*;
 public class AttendanceRuleController {
     private final AttendanceRuleService service;
     public AttendanceRuleController(AttendanceRuleService service){this.service=service;}
+    @PutMapping("/{year}/time-ranges")
+    public ApiResponse<Map<String,Object>> saveTimes(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser u,
+            @PathVariable int year, @RequestBody AttendanceRuleService.TimeInput input) {
+        return ApiResponse.success(service.saveTimes(u, year, input));
+    }
+    @GetMapping("/my-schedule")
+    public ApiResponse<Map<String,Object>> schedule(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser u,
+            @RequestParam @DateTimeFormat(iso=DateTimeFormat.ISO.DATE) LocalDate date) {
+        return ApiResponse.success(service.mySchedule(u, date));
+    }
     @GetMapping("/{year}") public ApiResponse<Map<String,Object>> year(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser u,@PathVariable int year){return ApiResponse.success(service.getYear(u,year));}
     @PutMapping("/{year}/company-holidays") public ApiResponse<Map<String,Object>> company(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser u,@PathVariable int year,@RequestBody AttendanceRuleService.DatesInput input){return ApiResponse.success(service.saveCompany(u,year,input));}
     @GetMapping("/{year}/users") public ApiResponse<List<Map<String,Object>>> users(@RequestAttribute(AuthConstants.CURRENT_USER_ATTRIBUTE) ManagementUser u,@PathVariable int year){return ApiResponse.success(service.users(u,year));}

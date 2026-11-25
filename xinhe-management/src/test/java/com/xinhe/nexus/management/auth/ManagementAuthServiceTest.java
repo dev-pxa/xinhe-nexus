@@ -51,6 +51,26 @@ class ManagementAuthServiceTest {
     }
 
     @Test
+    void phoneLoginUsesTheSamePasswordAndIdentity() {
+        when(accountRepository.findByPhone("13800138000")).thenReturn(rootAccount);
+        when(passwordEncoder.matches("root", "bcrypt-hash")).thenReturn(true);
+        when(accountRepository.toManagementUser(rootAccount)).thenReturn(rootUser);
+        var result = authService.authenticate(new LoginRequest(" 13800138000 ", "root", false),
+                new MockHttpServletRequest(), new MockHttpServletResponse());
+        assertEquals(rootUser, result.user());
+        verify(valueOperations).set(startsWith(AuthConstants.SESSION_KEY_PREFIX), eq("1:3"), eq(Duration.ofHours(12)));
+    }
+
+    @Test
+    void missingOrAmbiguousPhoneCannotLogin() {
+        var result = authService.authenticate(new LoginRequest("13800138000", "root", false),
+                new MockHttpServletRequest(), new MockHttpServletResponse());
+        assertNull(result.user());
+        assertEquals("账号或密码错误", result.message());
+        verifyNoInteractions(passwordEncoder, valueOperations);
+    }
+
+    @Test
     void loginCreatesHttpOnlyCookieAndVersionedRedisSession() {
         when(accountRepository.findByUsername("root")).thenReturn(rootAccount);
         when(passwordEncoder.matches("root", "bcrypt-hash")).thenReturn(true);
